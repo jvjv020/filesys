@@ -31,6 +31,10 @@ public class Command {
     private CommandType commandType;
     private Integer auditCount;
     private String extraInfo;
+
+    /** 临时指令 JSON 配置（仅指令类型='T' 时有值，存于 temp_config 列） */
+    private String tempConfig;
+
     private LocalDateTime startTime;
     private String status;
 

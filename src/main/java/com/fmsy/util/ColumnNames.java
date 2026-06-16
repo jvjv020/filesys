@@ -45,6 +45,7 @@ public final class ColumnNames {
     public static final String PRE_OPS = "前置文件操作";
     public static final String POST_OPS = "后置文件操作";
     public static final String SPLIT_FIELDS = "拆分字段配置";
+    public static final String TEMP_CONFIG = "temp_config";
     public static final String STATUS = "状态";
 
     // 状态值
