@@ -1,0 +1,50 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.2.5'
+}
+
+group = 'com.fmsy'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+    implementation 'org.springframework.boot:spring-boot-starter'
+
+    implementation 'com.zaxxer:HikariCP'
+    implementation 'com.alibaba:druid:1.2.23'
+    implementation 'org.apache.commons:commons-pool2'
+    implementation 'commons-net:commons-net:3.10.0'
+    implementation 'org.yaml:snakeyaml'
+
+    implementation 'org.slf4j:slf4j-api'
+    runtimeOnly 'ch.qos.logback:logback-classic'
+
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+}
+
+// 测试模块已禁用 - 本地环境无测试条件,Phase 1 重构后所有 *Test.java 不再纳入构建
+// (项目根目录的 src/test/ 目录仍存在,待用户手动删除)
+sourceSets {
+    test {
+        java.srcDirs = []
+        resources.srcDirs = []
+    }
+}
+
+tasks.named('test') {
+    enabled = false
+}
+
+tasks.named('bootJar') {
+    archiveFileName = 'fmsy.jar'
+}

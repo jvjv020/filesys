@@ -1,0 +1,8 @@
+[
+  {"name": "USER_ID",     "length": 10, "type": "string", "required": true},
+  {"name": "USER_NAME",   "length": 20, "type": "string", "required": true},
+  {"name": "AGE",         "length":  3, "type": "int",    "required": false},
+  {"name": "BALANCE",     "length": 12, "type": "double", "required": false},
+  {"name": "ACTIVE",      "length":  1, "type": "bool",   "required": true},
+  {"name": "CREATE_DATE", "length":  8, "type": "string", "required": true}
+]

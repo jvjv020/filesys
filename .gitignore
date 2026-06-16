@@ -1,0 +1,47 @@
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# Build outputs
+build/
+target/
+gradle/
+bin/
+out/
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Sensitive configurations
+*.yml.password
+*.properties.encrypted
+*.local.yaml
+secrets/
+
+# Test coverage
+jacoco/
+*.exec
+
+# Compression
+*.zip
+*.tar
+*.tar.gz
+*.rar
+
+# Gradle wrapper (optional, can be committed)
+# gradle/wrapper/gradle-wrapper.jar

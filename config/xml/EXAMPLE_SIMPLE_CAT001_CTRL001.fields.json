@@ -1,0 +1,8 @@
+{
+  "rootElement": "Orders",
+  "recordElement": "Order",
+  "ORDER_ID": "Header/OrderNo",
+  "CUSTOMER_NAME": "Customer/Info/Name",
+  "AMOUNT": "Payment/Amount",
+  "ORDER_DATE": "Header/Date"
+}

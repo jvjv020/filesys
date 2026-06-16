@@ -1,0 +1,60 @@
+spring:
+  application:
+    name: fmsy
+
+database:
+  config:
+    - id: DB_DEFAULT
+      host: 192.168.1.100
+      port: 5432
+      database: fmsy
+      username: fmsy_user
+      password: ${DB_PASSWORD}
+
+ftp:
+  config:
+    # P2#2:基础配置示例 —— 关闭故障转移与健康检查
+    - id: FTP_DEFAULT
+      host: 192.168.1.101
+      port: 21
+      username: ftp_user
+      password: ${FTP_PASSWORD}
+      timeout: 30000
+      pool:
+        maxTotal: 10
+      # 故障转移(DNS 解析后多 IP 轮询),默认关闭
+      failover:
+        enabled: false
+        maxRetries: 2
+      # 健康检查(daemon 线程 NOOP 探活),默认关闭
+      healthCheck:
+        enabled: false
+        intervalSeconds: 30
+    # P2#2:启用故障转移 + 健康检查的生产配置示例
+    # - id: FTP_PROD
+    #   host: ftp.example.com       # 域名需配置多 A 记录(DNS 解析为多个 IP)
+    #   port: 21
+    #   username: prod_user
+    #   password: ${FTP_PROD_PASSWORD}
+    #   timeout: 30000
+    #   pool:
+    #     maxTotal: 20
+    #   failover:
+    #     enabled: true              # DNS 多 IP 故障转移
+    #     maxRetries: 3              # 所有 IP 都失败后整体重试 3 次
+    #   healthCheck:
+    #     enabled: true              # 定时剔除池中失活连接
+    #     intervalSeconds: 60
+
+app:
+  node:
+    id: ${HOSTNAME:node-local}
+  polling:
+    interval: 10
+    batchSize: 20
+    taskTimeoutHours: 1
+  log:
+    path: /var/log/fmsy
+  download:
+    bucketBatchSize: 3
+    maxPollIterations: 1000
