@@ -161,10 +161,10 @@ public class CommandRepository {
     private static final String SQL_FIND_READY_COMMANDS =
         "SELECT " + ColumnNames.ID + ", " + ColumnNames.CATEGORY_CODE + ", " +
         ColumnNames.CONTROL_CODE + ", " + ColumnNames.COMMAND_TYPE + ", " +
-        ColumnNames.AUDIT_COUNT + ", " + ColumnNames.EXTRA_INFO +
+        ColumnNames.AUDIT_COUNT + ", " + ColumnNames.EXTRA_INFO + ", " + ColumnNames.TEMP_CONFIG +
         " FROM (SELECT " + ColumnNames.ID + ", " + ColumnNames.CATEGORY_CODE + ", " +
         ColumnNames.CONTROL_CODE + ", " + ColumnNames.COMMAND_TYPE + ", " +
-        ColumnNames.AUDIT_COUNT + ", " + ColumnNames.EXTRA_INFO + ", " +
+        ColumnNames.AUDIT_COUNT + ", " + ColumnNames.EXTRA_INFO + ", " + ColumnNames.TEMP_CONFIG + ", " +
         "ROW_NUMBER() OVER (PARTITION BY " + ColumnNames.CATEGORY_CODE + ", " +
         ColumnNames.CONTROL_CODE + " ORDER BY " + ColumnNames.ID + " ASC) AS rn" +
         " FROM " + TableNames.COMMAND_TABLE + " WHERE " + ColumnNames.PROCESS_STATUS + "=? AND " +
@@ -183,6 +183,7 @@ public class CommandRepository {
             cmd.setCommandType(type == null ? null : CommandType.valueOf(type));
             cmd.setAuditCount(rs.getInt(ColumnNames.AUDIT_COUNT));
             cmd.setExtraInfo(rs.getString(ColumnNames.EXTRA_INFO));
+            cmd.setTempConfig(rs.getString(ColumnNames.TEMP_CONFIG));
             return cmd;
         };
         return getJdbc().query(SQL_FIND_READY_COMMANDS, mapper, ColumnNames.STATUS_EMPTY, limit);
@@ -263,7 +264,7 @@ public class CommandRepository {
     private static final String SQL_FIND_BY_ID =
         "SELECT " + ColumnNames.ID + ", " + ColumnNames.CATEGORY_CODE + ", " +
         ColumnNames.CONTROL_CODE + ", " + ColumnNames.COMMAND_TYPE + ", " +
-        ColumnNames.AUDIT_COUNT + ", " + ColumnNames.EXTRA_INFO +
+        ColumnNames.AUDIT_COUNT + ", " + ColumnNames.EXTRA_INFO + ", " + ColumnNames.TEMP_CONFIG +
         " FROM " + TableNames.COMMAND_TABLE + " WHERE " + ColumnNames.ID + "=?";
 
     /**
@@ -285,6 +286,7 @@ public class CommandRepository {
         cmd.setAuditCount(row.get(ColumnNames.AUDIT_COUNT) != null
                 ? ((Number) row.get(ColumnNames.AUDIT_COUNT)).intValue() : null);
         cmd.setExtraInfo((String) row.get(ColumnNames.EXTRA_INFO));
+        cmd.setTempConfig((String) row.get(ColumnNames.TEMP_CONFIG));
         return cmd;
     }
 }
