@@ -199,7 +199,7 @@ public class ChildCommandMonitor {
             TransferConfig config = configLoader.getConfigOrDefault(categoryCode, controlCode);
             if (config == null && mainCommandId != null) {
                 Command mainCmd = commandRepository.findById(mainCommandId);
-                if (mainCmd != null && mainCmd.getCommandType() == com.fmsy.enums.CommandType.TEMPORARY) {
+                if (mainCmd != null && mainCmd.getCommandType() == CommandType.TEMPORARY) {
                     config = tempConfigFactory.build(mainCmd);
                 }
             }

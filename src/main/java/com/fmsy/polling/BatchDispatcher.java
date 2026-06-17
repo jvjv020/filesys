@@ -1,6 +1,7 @@
 package com.fmsy.polling;
 
 import com.fmsy.config.AppConfig;
+import com.fmsy.enums.CommandType;
 import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.lifecycle.ShutdownService;
 
@@ -82,7 +83,7 @@ public class BatchDispatcher {
                 log.debug("Command competed successfully: {}", cmd.getId());
                 // 3. 查询配置 - 配置缺失时按需求 7.4.2.4 置 E + 写结果
                 TransferConfig config;
-                if (cmd.getCommandType() == com.fmsy.enums.CommandType.TEMPORARY) {
+                if (cmd.getCommandType() == CommandType.TEMPORARY) {
                     try {
                         config = tempConfigFactory.build(cmd);
                     } catch (Exception e) {

@@ -65,7 +65,7 @@ public class TransferService {
 
             // 配置缺失时按需求 7.4.2.4 置 E + 写结果(避免命令卡 PROCESSING)
             TransferConfig config;
-            if (command.getCommandType() == com.fmsy.enums.CommandType.TEMPORARY) {
+            if (command.getCommandType() == CommandType.TEMPORARY) {
                 try {
                     config = tempConfigFactory.build(command);
                 } catch (Exception e) {
