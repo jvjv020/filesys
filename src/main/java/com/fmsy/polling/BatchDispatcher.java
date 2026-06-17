@@ -8,6 +8,7 @@ import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
+import com.fmsy.transfer.TempTransferConfigFactory;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -42,6 +43,7 @@ public class BatchDispatcher {
     private final SerialConstraintChecker constraintChecker;
     private final ShutdownService shutdownService;
     private final ConfigLoaderService configLoader;
+    private final TempTransferConfigFactory tempConfigFactory;
     private final CommandRepository commandRepository;
     /** 每轮 poll 创建的批处理线程池工厂(batchSize → ExecutorService) */
     private final IntFunction<ExecutorService> batchExecutorFactory;
@@ -79,7 +81,19 @@ public class BatchDispatcher {
                 }
                 log.debug("Command competed successfully: {}", cmd.getId());
                 // 3. 查询配置 - 配置缺失时按需求 7.4.2.4 置 E + 写结果
-                TransferConfig config = configLoader.getConfigOrDefault(cmd.getCategoryCode(), cmd.getControlCode());
+                TransferConfig config;
+                if (cmd.getCommandType() == com.fmsy.enums.CommandType.TEMPORARY) {
+                    try {
+                        config = tempConfigFactory.build(cmd);
+                    } catch (Exception e) {
+                        log.error("Failed to build temp config for command {}: {}", cmd.getId(), e.getMessage());
+                        commandRepository.markErrorWithResult(cmd.getId(), cmd.getCategoryCode(),
+                                cmd.getControlCode(), "Temp config error: " + e.getMessage());
+                        continue;
+                    }
+                } else {
+                    config = configLoader.getConfigOrDefault(cmd.getCategoryCode(), cmd.getControlCode());
+                }
                 if (config == null) {
                     log.error("No config found for command: {}, marking as ERROR", cmd.getId());
                     commandRepository.markErrorWithResult(cmd.getId(), cmd.getCategoryCode(),

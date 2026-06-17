@@ -38,6 +38,7 @@ public class TransferService {
     private final DetailPollingService detailPollingService;
     private final AppConfig appConfig;
     private final CommandRepository commandRepository;
+    private final TempTransferConfigFactory tempConfigFactory;
 
     /**
      * 处理命令入口
@@ -63,8 +64,20 @@ public class TransferService {
             command.markStartTimeIfAbsent();
 
             // 配置缺失时按需求 7.4.2.4 置 E + 写结果(避免命令卡 PROCESSING)
-            TransferConfig config = configLoader.getConfigOrDefault(
-                    command.getCategoryCode(), command.getControlCode());
+            TransferConfig config;
+            if (command.getCommandType() == com.fmsy.enums.CommandType.TEMPORARY) {
+                try {
+                    config = tempConfigFactory.build(command);
+                } catch (Exception e) {
+                    commandRepository.markErrorWithResult(commandId,
+                            command.getCategoryCode(), command.getControlCode(),
+                            "Temp config error: " + e.getMessage());
+                    return;
+                }
+            } else {
+                config = configLoader.getConfigOrDefault(
+                        command.getCategoryCode(), command.getControlCode());
+            }
             if (config == null) {
                 commandRepository.markErrorWithResult(commandId,
                         command.getCategoryCode(), command.getControlCode(),

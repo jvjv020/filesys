@@ -25,6 +25,7 @@ import java.util.Map;
  * 特殊情况：
  * - S型子命令：如果同属一个主命令，允许并发处理
  * - 不同主命令的S型子命令之间需要检查串行约束
+ * - T类型临时指令：不参与串行约束，直接放行
  */
 @Component
 @RequiredArgsConstructor
@@ -40,6 +41,10 @@ public class SerialConstraintChecker {
      * @return true=允许执行，false=应等待
      */
     public boolean check(Command command, Map<String, CommandProcessingTracker> processingMap) {
+        // T 类型临时指令不参与串行约束
+        if (command.getCommandType() == CommandType.TEMPORARY) {
+            return true;
+        }
         String currentNodeId = appConfig.getNode().getId();
 
         // S型子命令特殊处理
