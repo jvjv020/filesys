@@ -5,6 +5,7 @@ import com.fmsy.audit.AuditService;
 import com.fmsy.config.AppConfig;
 import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
+import com.fmsy.enums.CommandType;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.enums.EmptyDataHandling;
 import com.fmsy.ftp.FtpClient;
