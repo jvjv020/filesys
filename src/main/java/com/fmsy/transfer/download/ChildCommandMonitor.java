@@ -5,11 +5,13 @@ import com.fmsy.util.LogUtils;
 import com.fmsy.util.SystemConstants;
 import com.fmsy.fileops.FlagFileService;
 import com.fmsy.ftp.FtpPool;
+import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.ResultRepository;
+import com.fmsy.transfer.TempTransferConfigFactory;
 import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
@@ -48,6 +50,7 @@ public class ChildCommandMonitor {
     private final ResultRepository resultRepository;
     private final CommandRepository commandRepository;
     private final DataSourceConfig.DbPool dbPool;
+    private final TempTransferConfigFactory tempConfigFactory;
 
     public ChildCommandMonitor(DetailRepository detailRepository,
                                ConfigLoaderService configLoader, FtpPool ftpPool,
@@ -194,6 +197,12 @@ public class ChildCommandMonitor {
         if (allSuccess && categoryCode != null && controlCode != null) {
             // 主命令下所有桶成功后若配置刚好被卸载,只跳过 TOTAL,不阻塞监控
             TransferConfig config = configLoader.getConfigOrDefault(categoryCode, controlCode);
+            if (config == null && mainCommandId != null) {
+                Command mainCmd = commandRepository.findById(mainCommandId);
+                if (mainCmd != null && mainCmd.getCommandType() == com.fmsy.enums.CommandType.TEMPORARY) {
+                    config = tempConfigFactory.build(mainCmd);
+                }
+            }
             if (config != null) {
                 String postOps = config.getPostOperations();
                 String totalFlagOnlyOps = FlagFileService.filterOpsByType(postOps, "TOTAL");

@@ -14,10 +14,12 @@ import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
+import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.ResultRepository;
 import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.BucketDistributor;
+import com.fmsy.transfer.TempTransferConfigFactory;
 import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferSupport;
@@ -73,6 +75,8 @@ public class DetailPollingService {
     private final TargetTableRepository targetTableRepository;
     private final BucketDistributor bucketDistributor;
     private final ConfigLoaderService configLoader;
+    private final CommandRepository commandRepository;
+    private final TempTransferConfigFactory tempConfigFactory;
     private final AppConfig appConfig;
     private final FtpPool ftpPool;
     private final TransferSupport transferSupport;
@@ -108,6 +112,14 @@ public class DetailPollingService {
         ExecutorService bucketExecutor = null;
 
         try {
+            // 提前解析配置，供所有桶共享（支持 T 类型主命令回溯）
+            TransferConfig sharedConfig = resolveTempConfig(subCommand);
+            if (sharedConfig == null) {
+                log.error("Cannot resolve config for sub-command {}, marking ERROR", subCommand.getId());
+                writeSubCommandResult(subCommand, startTime, 0, 0, 1, 0);
+                return;
+            }
+
             int iteration = 0;
             while (iteration < maxIterations) {
                 // 关闭检查:不开始新批次
@@ -138,7 +150,8 @@ public class DetailPollingService {
                 // 本批次独立线程池,与之前/之后批次隔离
                 bucketExecutor = batchExecutorFactory.apply(buckets.size());
                 for (Detail bucket : buckets) {
-                    bucketExecutor.execute(() -> runOneBucket(bucket, nodeId, successCount, failedCount, skippedCount));
+                    TransferConfig bucketConfig = sharedConfig;
+                    bucketExecutor.execute(() -> runOneBucket(bucket, nodeId, bucketConfig, successCount, failedCount, skippedCount));
                 }
                 bucketExecutor.shutdown();
                 if (!bucketExecutor.awaitTermination(1, java.util.concurrent.TimeUnit.HOURS)) {
@@ -178,8 +191,7 @@ public class DetailPollingService {
         long durationMs = System.currentTimeMillis() - startTime;
         String status = determineSubCommandResult(failed, skipped, success);
         // 配置在子命令执行期间被卸载时也能写一条带默认 DB 的结果表
-        TransferConfig config = configLoader.getConfigOrDefault(
-                subCommand.getCategoryCode(), subCommand.getControlCode());
+        TransferConfig config = resolveTempConfig(subCommand);
 
         Result result = Result.builder()
                 .commandId(subCommand.getId())
@@ -206,7 +218,7 @@ public class DetailPollingService {
     }
 
     /** 单桶执行入口(运行在桶线程池中):try/catch + 计数累加,异常不逃逸 */
-    private void runOneBucket(Detail bucket, String nodeId,
+    private void runOneBucket(Detail bucket, String nodeId, TransferConfig config,
                               AtomicInteger successCount, AtomicInteger failedCount, AtomicInteger skippedCount) {
         try {
             int affected = bucketDistributor.competeBucket(bucket.getId(), nodeId);
@@ -215,7 +227,7 @@ public class DetailPollingService {
                 return;
             }
             log.info("Competed bucket: {}, fieldValue: {}", bucket.getId(), bucket.getFieldValue());
-            BucketOutcome outcome = processBucket(bucket, nodeId);
+            BucketOutcome outcome = processBucket(bucket, nodeId, config);
             switch (outcome) {
                 case SUCCESS -> successCount.incrementAndGet();
                 case FAILED -> failedCount.incrementAndGet();
@@ -229,6 +241,39 @@ public class DetailPollingService {
 
     private enum BucketOutcome { SUCCESS, FAILED, SKIPPED }
 
+    /**
+     * 解析 S 子命令对应的 TransferConfig。
+     * 优先查传输配置表，若查不到且主命令是 T 类型，则从主命令的 temp_config 构建。
+     *
+     * @param subCommand S 型子命令
+     * @return TransferConfig，完全查不到时返回 null
+     */
+    private TransferConfig resolveTempConfig(Command subCommand) {
+        String cat = subCommand.getCategoryCode();
+        String ctrl = subCommand.getControlCode();
+        TransferConfig config = configLoader.getConfigOrDefault(cat, ctrl);
+        if (config != null) {
+            return config;
+        }
+        // 从 extraInfo 解析主命令 ID (格式: "mainId|baseFilePath")
+        String extraInfo = subCommand.getExtraInfo();
+        if (extraInfo == null || !extraInfo.contains("|")) {
+            log.warn("Cannot resolve main command id from extraInfo: {}", extraInfo);
+            return null;
+        }
+        String mainIdStr = extraInfo.substring(0, extraInfo.indexOf('|'));
+        try {
+            Command mainCommand = commandRepository.findById(Long.parseLong(mainIdStr));
+            if (mainCommand != null && mainCommand.getCommandType() == CommandType.TEMPORARY) {
+                log.info("Resolved config from T-type main command: {}", mainCommand.getId());
+                return tempConfigFactory.build(mainCommand);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to resolve temp config from main command: {}", e.getMessage());
+        }
+        return null;
+    }
+
     private String determineSubCommandResult(int failed, int skipped, int success) {
         if (success == 0 && failed == 0 && skipped == 0) return ColumnNames.STATUS_SKIPPED;
         if (failed > 0 && success == 0 && skipped == 0) return ColumnNames.STATUS_ERROR;
@@ -238,11 +283,10 @@ public class DetailPollingService {
     }
 
     /** 处理单个桶的数据,返回处理结果(供外层汇总) */
-    private BucketOutcome processBucket(Detail bucket, String nodeId) {
-        TransferConfig config = configLoader.getConfigOrDefault(
-                bucket.getCategoryCode(), bucket.getControlCode());
+    private BucketOutcome processBucket(Detail bucket, String nodeId, TransferConfig config) {
+        // config 由调用方传入(已通过 resolveTempConfig 解析),直接使用
         if (config == null) {
-            log.error("No config found for bucket: {}, category={}, control={}",
+            log.warn("No config found for bucket: {}, category={}, control={}",
                     bucket.getId(), bucket.getCategoryCode(), bucket.getControlCode());
             detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_ERROR, nodeId);
             return BucketOutcome.FAILED;
