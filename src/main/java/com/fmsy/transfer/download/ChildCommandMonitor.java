@@ -1,6 +1,7 @@
 package com.fmsy.transfer.download;
 
 import com.fmsy.config.DataSourceConfig;
+import com.fmsy.enums.CommandType;
 import com.fmsy.util.LogUtils;
 import com.fmsy.util.SystemConstants;
 import com.fmsy.fileops.FlagFileService;

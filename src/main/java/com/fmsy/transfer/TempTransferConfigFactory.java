@@ -85,10 +85,13 @@ public class TempTransferConfigFactory {
                 config.setEmptyDataHandling(EmptyDataHandling.valueOf(emptyStr));
             } catch (IllegalArgumentException e) {
                 log.warn("Invalid emptyDataHandling '{}' for command {}, using ALLOW", emptyStr, command.getId());
+                config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
             }
+        } else {
+            config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
         }
 
-        log.info("Built TransferConfig from temp_config for command: {}", command.getId());
+        log.debug("Built TransferConfig from temp_config for command: {}", command.getId());
         return config;
     }
 

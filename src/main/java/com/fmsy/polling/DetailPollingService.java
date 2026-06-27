@@ -111,13 +111,14 @@ public class DetailPollingService {
         AtomicInteger skippedCount = new AtomicInteger(0);
         int totalBucketCount = 0;
         ExecutorService bucketExecutor = null;
+        TransferConfig sharedConfig = null;
 
         try {
             // 提前解析配置，供所有桶共享（支持 T 类型主命令回溯）
-            TransferConfig sharedConfig = resolveTempConfig(subCommand);
+            sharedConfig = resolveTempConfig(subCommand);
             if (sharedConfig == null) {
                 log.error("Cannot resolve config for sub-command {}, marking ERROR", subCommand.getId());
-                writeSubCommandResult(subCommand, startTime, 0, 0, 1, 0);
+                writeSubCommandResult(subCommand, startTime, null, 0, 0, 1, 0);
                 return;
             }
 
@@ -181,18 +182,16 @@ public class DetailPollingService {
             }
             // 写子命令结束的结果表记录(需求:每个指令结束都得写结果表)
             // 放在 finally 内确保异常路径也会执行
-            writeSubCommandResult(subCommand, startTime, totalBucketCount,
+            writeSubCommandResult(subCommand, startTime, sharedConfig, totalBucketCount,
                     successCount.get(), failedCount.get(), skippedCount.get());
         }
     }
 
     /** 写子命令结束的结果表记录(无论成功/异常都调用) */
-    private void writeSubCommandResult(Command subCommand, long startTime, int bucketCount,
+    private void writeSubCommandResult(Command subCommand, long startTime, TransferConfig config, int bucketCount,
                                        int success, int failed, int skipped) {
         long durationMs = System.currentTimeMillis() - startTime;
         String status = determineSubCommandResult(failed, skipped, success);
-        // 配置在子命令执行期间被卸载时也能写一条带默认 DB 的结果表
-        TransferConfig config = resolveTempConfig(subCommand);
 
         Result result = Result.builder()
                 .commandId(subCommand.getId())
