@@ -5,7 +5,6 @@ import com.fmsy.db.PartitionHelper;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.TargetTableRepository;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -24,6 +23,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -44,14 +44,21 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class ParallelFileGenerator {
 
-    private static final int PARALLEL_THREADS = 3;
     private static final String TEMP_DIR_PREFIX = "fmsy-parallel";
 
     private final TargetTableRepository targetTableRepository;
     private final PartitionHelper partitionHelper;
+    private final int parallelThreads;
+
+    public ParallelFileGenerator(TargetTableRepository targetTableRepository,
+                                  PartitionHelper partitionHelper,
+                                  com.fmsy.config.AppConfig appConfig) {
+        this.targetTableRepository = targetTableRepository;
+        this.partitionHelper = partitionHelper;
+        this.parallelThreads = appConfig.getDownload().getParallelThreads();
+    }
 
     /**
      * 生成文件 — 自动判断是否使用并行模式。
@@ -124,13 +131,13 @@ public class ParallelFileGenerator {
             return generateSerial(output, config, converter, mapping, preCountedRecords);
         }
 
-        ExecutorService executor = Executors.newFixedThreadPool(PARALLEL_THREADS);
+        ExecutorService executor = Executors.newFixedThreadPool(parallelThreads);
         AtomicInteger totalCount = new AtomicInteger(0);
         AtomicBoolean anyFailed = new AtomicBoolean(false);
         List<Path> tempFiles = new ArrayList<>(partitions.size());
         List<Future<?>> futures = new ArrayList<>(partitions.size());
 
-        log.info("Parallel[{}] start: {} partitions, {} threads", tag, partitions.size(), PARALLEL_THREADS);
+        log.info("Parallel[{}] start: {} partitions, {} threads", tag, partitions.size(), parallelThreads);
 
         // === Phase 1: 提交所有分区任务 ===
         for (int i = 0; i < partitions.size(); i++) {
@@ -216,6 +223,14 @@ public class ParallelFileGenerator {
         }
 
         executor.shutdownNow();
+        try {
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                log.warn("Parallel[{}] some partition threads did not terminate within 5s", tag);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Parallel[{}] interrupted while waiting for partition thread termination", tag);
+        }
         cleanupTempDir(tempDir);
         return totalCount.get();
     }

@@ -56,6 +56,9 @@ public class SqlBuilder {
         }
     }
 
+    /** 单条批量 INSERT 的最大行数，防止生成超长 SQL */
+    private static final int MAX_BATCH_INSERT_ROWS = 2000;
+
     /**
      * 构建批量INSERT语句 — 手动拼多值 VALUES，不依赖驱动参数。
      *
@@ -71,6 +74,10 @@ public class SqlBuilder {
     public static String buildBatchInsert(String table, List<String> fields, int batchSize) {
         if (!isValidIdentifier(table)) {
             throw new IllegalArgumentException("Invalid table name: " + table);
+        }
+        if (batchSize > MAX_BATCH_INSERT_ROWS) {
+            throw new IllegalArgumentException("Batch insert row count " + batchSize
+                    + " exceeds maximum " + MAX_BATCH_INSERT_ROWS);
         }
         String columns = joinIdentifiers(fields);
         String rowPlaceholders = "(" + String.join(", ", fields.stream().map(f -> "?").toList()) + ")";

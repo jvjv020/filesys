@@ -3,6 +3,48 @@ package com.fmsy.transfer;
 import com.fmsy.ftp.FtpClient;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+/**
+ * 传输工具类 — 仅保留跨场景、与注入字段无关的纯静态工具。
+ *
+ * <p>本类当前仅包含 {@link #rollbackAfterPostAuditFailure(FtpClient, String, String)} —
+ * 后审计失败时回滚 FTP 文件,与 FtpClient 自身状态无关,适合作为静态工具。
+ */
+@Slf4j
+public final class TransferUtils {
+
+    private TransferUtils() {
+    }
+
+    /**
+     * 将两个逗号分隔字符串按位置一一对应解析为 Map。
+     * <p>例如: {@code splitFieldValues("REGION,STATUS", "EAST,ACTIVE")}
+     * → {@code {"REGION" -> "EAST", "STATUS" -> "ACTIVE"}}
+     *
+     * @param names  逗号分隔的键名
+     * @param values 逗号分隔的值
+     * @return 键值映射(不包含空键),不会为 null
+     */
+    public static Map<String, String> splitFieldValues(String names, String values) {
+        Map<String, String> result = new LinkedHashMap<>();
+        if (names == null || names.isEmpty() || values == null || values.isEmpty()) {
+            return result;
+        }
+        String[] nameArr = names.split(",");
+        String[] valueArr = values.split(",");
+        int len = Math.min(nameArr.length, valueArr.length);
+        for (int i = 0; i < len; i++) {
+            String n = nameArr[i].trim();
+            String v = valueArr[i].trim();
+            if (!n.isEmpty()) {
+                result.put(n, v);
+            }
+        }
+        return result;
+    }
+
 /**
  * 传输工具类 — 仅保留跨场景、与注入字段无关的纯静态工具。
  *

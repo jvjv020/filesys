@@ -249,6 +249,45 @@ public class CommandRepository {
     }
 
     /**
+     * 批量创建 S 型子命令 — 使用单条多值 INSERT 减少网络往返。
+     *
+     * <p>生成 {@code INSERT INTO 指令表 (cat, ctrl, 'S', extraInfo, auditCount, '')
+     * VALUES (?, ?, 'S', ?, ?, ''), (?, ?, 'S', ?, ?, ''), ...}
+     * 然后一次 {@code update()} 完成 N 行插入。
+     *
+     * @param count        创建数量
+     * @param categoryCode 类别代号
+     * @param controlCode  控制代号
+     * @param extraInfo    "mainId|baseFilePath" 格式
+     * @param auditCount   稽核数(传 -1 表示不预填)
+     */
+    public void batchCreateChildCommands(int count, String categoryCode, String controlCode,
+                                         String extraInfo, int auditCount) {
+        if (count <= 0) return;
+        String rowPlaceholder = "(?, ?, 'S', ?, ?, ?)";
+        StringBuilder sql = new StringBuilder(
+                "INSERT INTO " + TableNames.COMMAND_TABLE + " (" +
+                ColumnNames.CATEGORY_CODE + ", " + ColumnNames.CONTROL_CODE + ", " +
+                ColumnNames.COMMAND_TYPE + ", " + ColumnNames.EXTRA_INFO + ", " +
+                ColumnNames.AUDIT_COUNT + ", " + ColumnNames.PROCESS_STATUS + ") VALUES ");
+        for (int i = 0; i < count; i++) {
+            if (i > 0) sql.append(", ");
+            sql.append(rowPlaceholder);
+        }
+        Object[] params = new Object[count * 5];
+        int idx = 0;
+        for (int i = 0; i < count; i++) {
+            params[idx++] = categoryCode;
+            params[idx++] = controlCode;
+            params[idx++] = extraInfo;
+            params[idx++] = auditCount;
+            params[idx++] = ColumnNames.STATUS_EMPTY;
+        }
+        getJdbc().update(sql.toString(), params);
+        log.debug("Batch created {} child command(s) for {}|{}", count, categoryCode, controlCode);
+    }
+
+    /**
      * 统计某主命令的已完成子命令数量(Y/N/E 任一即可)。
      * likePrefix 形如 "mainId|%"(Iteration #17 协议)。
      */

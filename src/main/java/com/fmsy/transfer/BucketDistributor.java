@@ -132,13 +132,11 @@ public class BucketDistributor {
         String extraInfo = mainCommandId.toString() + "|" + pathForExtraInfo;
 
         int created = 0;
-        // 每个桶都要对应一个独立的 S 型子命令(供各节点竞争),因此 N 桶必须 N 行独立 INSERT。
-        // 当前 CommandRepository 仅暴露单行 createChildCommand;若后续桶规模扩大,
-        // 可在 Repository 加 batchCreateChildCommands 把 N 次 SQL 合成 1 次 batchUpdate。
-        for (int i = 0; i < count; i++) {
-            int affected = commandRepository.createChildCommand(
-                    categoryCode, controlCode, extraInfo, -1);
-            created += affected;
+        // 迭代 #17:把 baseFilePath 嵌入 EXTRA_INFO,格式 "mainId|baseFilePath"
+        // 改为批量 INSERT,减少 N 次 SQL 网络往返为 1 次。
+        if (count > 0) {
+            commandRepository.batchCreateChildCommands(count, categoryCode, controlCode, extraInfo, -1);
+            created = count;
         }
 
         log.info("Created {} S-type child command(s) for main command {} (bucket count: {})",

@@ -233,7 +233,7 @@ public class DetailPollingService {
                 case FAILED -> failedCount.incrementAndGet();
                 case SKIPPED -> skippedCount.incrementAndGet();
             }
-        } catch (Throwable t) {
+        } catch (Exception t) {
             log.error("Bucket processing crashed: {}", bucket.getId(), t);
             failedCount.incrementAndGet();
         }
@@ -299,7 +299,7 @@ public class DetailPollingService {
         Integer detailAuditCount = bucket.getAuditCount();
         if (detailAuditCount != null && detailAuditCount >= 0) {
             recordCount = auditService.preAuditByBucket(
-                    config.getTableName(), splitFields, bucket.getFieldValue(), detailAuditCount);
+                    config.getTableName(), splitFields, bucket.getFieldValue(), detailAuditCount, config.getDbName());
             if (recordCount < 0) {
                 log.error("Pre-audit failed for bucket: {}", bucket.getId());
                 detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_SKIPPED, nodeId);
@@ -314,10 +314,11 @@ public class DetailPollingService {
         EmptyDataHandling emptyHandling = config.getEmptyDataHandling();
         if (!transferSupport.handleEmptyData(recordCount, emptyHandling)) {
             log.warn("Empty data handling for bucket: {}", bucket.getFieldValue());
+            // handleEmptyData 仅在 ERROR 或 SKIP 时返回 false，else 不可达
             if (emptyHandling == EmptyDataHandling.ERROR) {
                 detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_ERROR, nodeId);
                 return BucketOutcome.FAILED;
-            } else if (emptyHandling == EmptyDataHandling.SKIP) {
+            } else {
                 detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_SKIPPED, nodeId);
                 return BucketOutcome.SKIPPED;
             }
@@ -371,7 +372,8 @@ public class DetailPollingService {
         }
 
         // Phase 3: post-audit (borrows its own FTP client internally)
-        auditService.postAudit(AuditScenario.DOWNLOAD, config.getFtpName(), config.getTableName(), fileInfo.fullPath());
+        auditService.postAudit(AuditScenario.DOWNLOAD, config.getFtpName(),
+                config.getTableName(), fileInfo.fullPath(), -1, config.getDbName());
 
         long durationMs = System.currentTimeMillis() - startTime;
         log.info("Bucket processed successfully: detailId={}, fieldValue={}, filePath={}, records={}, durationMs={}, nodeId={}",

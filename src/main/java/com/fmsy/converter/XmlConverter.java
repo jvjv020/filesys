@@ -56,6 +56,36 @@ import java.util.NoSuchElementException;
 @Slf4j
 public class XmlConverter implements FileConverter {
 
+    /** 安全 XMLInputFactory — 禁用外部实体和 DTD，防止 XXE 攻击 */
+    private static XMLInputFactory createSecureInputFactory() {
+        XMLInputFactory factory = XMLInputFactory.newInstance();
+        factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);
+        factory.setProperty(XMLInputFactory.SUPPORT_DTD, false);
+        return factory;
+    }
+
+    /** 安全 TransformerFactory — 禁用外部实体 */
+    private static TransformerFactory createSecureTransformerFactory() {
+        TransformerFactory factory = TransformerFactory.newInstance();
+        factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+        factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
+        return factory;
+    }
+
+    /** 安全 SchemaFactory — 禁用外部实体 */
+    private static SchemaFactory createSecureSchemaFactory() {
+        SchemaFactory factory = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI);
+        try {
+            factory.setProperty(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+        } catch (SAXException ignored) {
+        }
+        try {
+            factory.setProperty(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+        } catch (SAXException ignored) {
+        }
+        return factory;
+    }
+
     @Override
     public Iterator<List<Map<String, Object>>> parse(InputStream input, FieldMapping mapping) {
         Map<String, String> cfg = ConverterUtils.mergeConfig(getDefaultConfig(), mapping);
@@ -251,7 +281,7 @@ public class XmlConverter implements FileConverter {
 
     private static byte[] transformBytes(byte[] source, java.nio.file.Path xslPath, java.nio.file.Path xsdPath) {
         try {
-            Transformer transformer = TransformerFactory.newInstance().newTransformer(new StreamSource(xslPath.toFile()));
+            Transformer transformer = createSecureTransformerFactory().newTransformer(new StreamSource(xslPath.toFile()));
             ByteArrayOutputStream output = new ByteArrayOutputStream();
             transformer.transform(new StreamSource(new ByteArrayInputStream(source)), new StreamResult(output));
             byte[] transformed = output.toByteArray();
@@ -266,7 +296,7 @@ public class XmlConverter implements FileConverter {
 
     private static void validate(byte[] source, java.nio.file.Path xsdPath) {
         try {
-            SchemaFactory factory = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI);
+            SchemaFactory factory = createSecureSchemaFactory();
             Schema schema = factory.newSchema(xsdPath.toFile());
             Validator validator = schema.newValidator();
             validator.validate(new StreamSource(new ByteArrayInputStream(source)));
@@ -310,7 +340,7 @@ public class XmlConverter implements FileConverter {
             this.fieldPaths = fieldPaths != null ? fieldPaths : Map.of();
             XMLStreamReader xmlReader = null;
             try {
-                XMLInputFactory factory = XMLInputFactory.newInstance();
+                XMLInputFactory factory = createSecureInputFactory();
                 xmlReader = factory.createXMLStreamReader(input);
                 reader = xmlReader;
                 parseRootAndFields();

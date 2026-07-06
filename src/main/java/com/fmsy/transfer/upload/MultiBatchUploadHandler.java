@@ -76,16 +76,22 @@ public class MultiBatchUploadHandler implements UploadHandler {
             int successCount = 0;
             int skippedCount = 0;
             int failedCount = 0;
+            ResolvedPath lastFileInfo = null;
             for (Map<String, Object> detail : details) {
                 UploadSupport.UploadResult perFile = processOneDetail(command, config, client, detail, nodeId);
                 totalRecords += perFile.records();
                 successCount += perFile.successCount();
                 skippedCount += perFile.skippedCount();
                 failedCount += perFile.failedCount();
+
+                // 记录最后一个成功处理文件的 ResolvedPath，供后置操作的文件衍生变量使用
+                String fileName = (String) detail.get(ColumnNames.FILE_NAME);
+                if (fileName != null && !fileName.isEmpty() && perFile.successCount() > 0) {
+                    lastFileInfo = resolveDetailFilePath(command, config, detail, fileName);
+                }
             }
 
-            // 后置处理（使用最后一个文件的 ResolvedPath）
-            ResolvedPath lastFileInfo = null;
+            // 后置处理（使用最后一个成功文件的 ResolvedPath）
             Map<String, String> extra = new HashMap<>();
             extra.put("C", String.valueOf(totalRecords));
             transferSupport.postProcess(client, config, lastFileInfo, extra);

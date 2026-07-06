@@ -86,12 +86,19 @@ public class FtpPool {
     }
 
     public boolean ping(String ftpId) {
-        FtpConfigHolder holder = pools.get(ftpId);
-        if (holder == null) {
-            log.error("FTP ping: config not found: {}", ftpId);
+        try {
+            return withClient(ftpId, client -> {
+                try {
+                    return client.getClient().sendNoOp();
+                } catch (IOException e) {
+                    log.warn("FTP ping failed for {}: {}", ftpId, e.getMessage());
+                    return false;
+                }
+            });
+        } catch (Exception e) {
+            log.error("FTP ping error for {}: {}", ftpId, e.getMessage());
             return false;
         }
-        return holder.ping();
     }
 
     @PreDestroy
@@ -203,14 +210,22 @@ public class FtpPool {
          * <p>空闲连接复用和池满等待在锁内(快速路径)；
          * 创建新连接({@link #createClientWithFailover})在锁外,
          * 避免网络连接超时期间阻塞其他线程的归还/借出操作。
+         *
+         * <p>空闲连接的 NOOP 验证在锁外执行,避免网络 I/O 阻塞锁内的
+         * 其他线程的借出/归还操作。验证失败的连接会被丢弃并重试。
          */
         FtpClient getClient() {
             int maxIdleSeconds = config.getPool().getMaxIdleTimeSeconds();
             while (true) {
-                // Phase 1: 锁内 — 空闲复用 / 等待
-                FTPClient idleClient = borrowIdleOrWait(maxIdleSeconds);
-                if (idleClient != null) {
-                    return new FtpClient(idleClient, this);
+                // Phase 1: 锁内 — 空闲复用 / 等待（不执行网络 I/O）
+                FTPClient candidate = borrowIdleOrWait(maxIdleSeconds);
+                if (candidate != null) {
+                    // Phase 1.5: 锁外 — NOOP 验证（网络 I/O 不在锁内执行）
+                    if (!isClientValid(candidate)) {
+                        removeClient(candidate);
+                        continue; // 验证失败，重试
+                    }
+                    return new FtpClient(candidate, this);
                 }
                 // Phase 2: 锁外 — 创建新连接(不阻塞其他线程)
                 FTPClient newClient = createClientWithFailover();
@@ -224,6 +239,7 @@ public class FtpPool {
 
         /**
          * 锁内:尝试借空闲连接或等待归还。
+         * 注意:空闲连接的 NOOP 验证在锁外执行(避免网络 I/O 阻塞其他线程的借出/归还)。
          * @return FTPClient(已加到 busy) 或 null(池有空位,需在锁外创建新连接)
          */
         private FTPClient borrowIdleOrWait(int maxIdleSeconds) {
@@ -238,11 +254,8 @@ public class FtpPool {
                             disconnectQuietly(entry.client, "idle timeout");
                             continue;
                         }
-                        if (!isClientValid(entry.client)) {
-                            it.remove();
-                            continue;
-                        }
                         it.remove();
+                        // 锁内只做移除，NOOP 验证放锁外执行，避免网络 I/O 阻塞其他线程
                         busy.add(entry.client);
                         return entry.client;
                     }
@@ -281,10 +294,12 @@ public class FtpPool {
 
         void returnClient(FtpClient ftpClient) {
             FTPClient client = ftpClient.getClient();
+            // 锁外验证（网络 I/O 不在锁内执行）
+            boolean valid = isClientValid(client);
             lock.lock();
             try {
                 busy.remove(client);
-                if (isClientValid(client)) {
+                if (valid) {
                     idle.add(new IdleEntry(client));
                 } else {
                     disconnectQuietly(client, "invalid return");
@@ -300,7 +315,13 @@ public class FtpPool {
             try {
                 idle.removeIf(entry -> entry.client == client);
                 busy.remove(client);
-                disconnectQuietly(client, "removeClient");
+            } finally {
+                lock.unlock();
+            }
+            // 锁外断开（网络 I/O 不在锁内执行）
+            disconnectQuietly(client, "removeClient");
+            lock.lock();
+            try {
                 notFull.signal();
             } finally {
                 lock.unlock();
@@ -311,6 +332,7 @@ public class FtpPool {
 
         void checkAllClients() {
             int maxIdleSeconds = config.getPool().getMaxIdleTimeSeconds();
+            List<FTPClient> toDisconnect = new ArrayList<>();
             lock.lock();
             try {
                 for (Iterator<IdleEntry> it = idle.iterator(); it.hasNext();) {
@@ -318,35 +340,19 @@ public class FtpPool {
                     long idleMs = System.currentTimeMillis() - entry.idleSince;
                     if (idleMs > maxIdleSeconds * 1000L) {
                         it.remove();
-                        disconnectQuietly(entry.client, "health check timeout");
-                        continue;
-                    }
-                    if (!isClientValid(entry.client)) {
-                        it.remove();
-                        disconnectQuietly(entry.client, "health check");
+                        toDisconnect.add(entry.client);
                     }
                 }
             } finally {
                 lock.unlock();
             }
+            // 锁外执行断开操作（避免网络 I/O 阻塞其他线程）
+            for (FTPClient client : toDisconnect) {
+                disconnectQuietly(client, "health check timeout");
+            }
         }
 
         // ---------- 连通性 / 创建 / 销毁 ----------
-
-        boolean ping() {
-            FTPClient client = null;
-            try {
-                client = createClientWithFailover();
-                return client.isConnected() && client.sendNoOp();
-            } catch (Exception e) {
-                log.warn("FTP ping failed: {}", e.getMessage());
-                return false;
-            } finally {
-                if (client != null) {
-                    try { client.disconnect(); } catch (IOException ignored) {}
-                }
-            }
-        }
 
         private boolean isClientValid(FTPClient client) {
             try {
@@ -421,14 +427,19 @@ public class FtpPool {
         }
 
         void close() {
+            List<FTPClient> allClients = new ArrayList<>();
             lock.lock();
             try {
-                for (IdleEntry entry : idle) disconnectQuietly(entry.client, "close.idle");
-                for (FTPClient c : busy) disconnectQuietly(c, "close.busy");
+                for (IdleEntry entry : idle) allClients.add(entry.client);
+                allClients.addAll(busy);
                 idle.clear();
                 busy.clear();
             } finally {
                 lock.unlock();
+            }
+            // 锁外断开（网络 I/O 不在锁内执行）
+            for (FTPClient c : allClients) {
+                disconnectQuietly(c, "close");
             }
         }
     }

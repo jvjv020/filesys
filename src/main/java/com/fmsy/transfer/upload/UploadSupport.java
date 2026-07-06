@@ -2,10 +2,12 @@ package com.fmsy.transfer.upload;
 
 import com.fmsy.config.DataSourceConfig;
 import com.fmsy.converter.FileConverter;
+import com.fmsy.enums.EmptyDataHandling;
 import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.TargetTableRepository;
+import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.SystemConstants;
 import lombok.RequiredArgsConstructor;
@@ -43,6 +45,7 @@ public class UploadSupport {
     private final FtpPool ftpPool;
     private final TargetTableRepository targetTableRepository;
     private final DataSourceConfig.DbPool dbPool;
+    private final TransferSupport transferSupport;
 
     // ==================== 协议方法(方向特有) ====================
 
@@ -163,7 +166,7 @@ public class UploadSupport {
                 totalRecords += batch.size();
             }
 
-            if (!handleEmptyData(totalRecords, emptyHandling)) {
+            if (!transferSupport.handleEmptyData(totalRecords, emptyHandling)) {
                 throw new RuntimeException("Empty data handling: " + emptyHandling);
             }
 

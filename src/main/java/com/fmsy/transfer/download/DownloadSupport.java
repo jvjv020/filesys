@@ -48,7 +48,8 @@ public class DownloadSupport {
      * @return 实际 DB 记录数（审计通过时）；-1（审计不通过）
      */
     public int preAudit(TransferConfig config, int auditCount) {
-        return auditService.preAudit(AuditScenario.DOWNLOAD, config.getTableName(), auditCount);
+        return auditService.preAudit(AuditScenario.DOWNLOAD, config.getTableName(), auditCount,
+                config.getDbName());
     }
 
     /**
@@ -58,7 +59,7 @@ public class DownloadSupport {
      */
     public int preAuditByBucket(TransferConfig config, int auditCount, String fieldValue) {
         return auditService.preAuditByBucket(config.getTableName(),
-                config.getSplitFields(), fieldValue, auditCount);
+                config.getSplitFields(), fieldValue, auditCount, config.getDbName());
     }
 
     /**
@@ -67,7 +68,7 @@ public class DownloadSupport {
      */
     public boolean postAudit(TransferConfig config, String filePath) {
         return auditService.postAudit(AuditScenario.DOWNLOAD, config.getFtpName(),
-                config.getTableName(), filePath);
+                config.getTableName(), filePath, -1, config.getDbName());
     }
 
     /**
@@ -75,7 +76,7 @@ public class DownloadSupport {
      */
     public boolean postAudit(TransferConfig config, String filePath, int knownDbCount) {
         return auditService.postAudit(AuditScenario.DOWNLOAD, config.getFtpName(),
-                config.getTableName(), filePath, knownDbCount);
+                config.getTableName(), filePath, knownDbCount, config.getDbName());
     }
 
     public int countRecords(TransferConfig config) {

@@ -217,22 +217,17 @@ public class SingleNodeDownloadHandler implements DownloadHandler {
 
         EmptyDataHandling emptyHandling = config.getEmptyDataHandling();
         if (!transferSupport.handleEmptyData(recordCount, emptyHandling)) {
+            // handleEmptyData 仅在 ERROR 或 SKIP 时返回 false，else 分支不可达
             if (emptyHandling == EmptyDataHandling.ERROR) {
                 allFilesSuccess.set(false);
                 failedCount.incrementAndGet();
                 support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_ERROR, nodeId);
-                return;
-            } else if (emptyHandling == EmptyDataHandling.SKIP) {
+            } else { // SKIP
                 allFilesSuccess.set(false);
                 skippedCount.incrementAndGet();
                 support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_SKIPPED, nodeId);
-                return;
-            } else {
-                allFilesSuccess.set(false);
-                failedCount.incrementAndGet();
-                support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_ERROR, nodeId);
-                return;
             }
+            return;
         }
 
         // Phase 2: FTP operations (borrow client just before use)

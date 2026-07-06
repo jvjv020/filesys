@@ -16,7 +16,6 @@ import com.fmsy.transfer.TempTransferConfigFactory;
 import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -71,6 +70,9 @@ public class ChildCommandMonitor {
      * 启动后台监控线程,等待子命令完成。立即返回,真正的轮询逻辑在 {@link #runMonitor} 中。
      * 监控与主命令生命周期解耦,主命令 Orchestrator 完成 finalize 后即可放手。
      *
+     * <p>非 daemon 线程 + ShutdownService 跟踪,确保关闭时监控线程能完成状态更新,
+     * 避免主命令永久卡在 P 状态。
+     *
      * @param mainCommandId    主命令 ID
      * @param expectedChildren 期望的子命令数量
      */
@@ -82,7 +84,7 @@ public class ChildCommandMonitor {
                 log.error("Child command monitor crashed for cmd {}: {}", mainCommandId, th.getMessage(), th);
             }
         }, "fmsy-child-monitor-" + mainCommandId);
-        t.setDaemon(true);
+        t.setDaemon(false);
         t.start();
     }
 
@@ -94,7 +96,9 @@ public class ChildCommandMonitor {
         log.info("Starting monitor for main command: {}, expected children: {}", mainCommandId, expectedChildren);
         int completed = 0;
 
-        // 轮询检查子命令完成情况
+        // 轮询检查子命令完成情况(指数退避:初始 1s,最大 10s)
+        long pollInterval = 1000L;
+        long maxInterval = 10000L;
         for (int i = 0; i < SystemConstants.MONITOR_MAX_ITERATIONS; i++) {
             completed = countCompletedChildren(mainCommandId);
             log.info("Completed children: {}/{}", completed, expectedChildren);
@@ -106,11 +110,13 @@ public class ChildCommandMonitor {
             }
 
             try {
-                Thread.sleep(SystemConstants.MONITOR_INTERVAL_MS);
+                Thread.sleep(pollInterval);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
             }
+            // 退避:每次翻倍直到上限
+            pollInterval = Math.min(pollInterval * 2, maxInterval);
         }
 
         log.error("Monitor timeout for main command: {}, completed: {}/{}", mainCommandId, completed, expectedChildren);

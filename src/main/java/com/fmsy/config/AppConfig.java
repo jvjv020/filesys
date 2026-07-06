@@ -53,5 +53,7 @@ public class AppConfig {
         private int bucketBatchSize = 3;
         /** S子命令外层轮询最大迭代次数(防止极端情况下空转或bug导致死循环,默认1000) */
         private int maxPollIterations = 1000;
+        /** 分区并行生成文件的线程数,默认 3 */
+        private int parallelThreads = 3;
     }
 }

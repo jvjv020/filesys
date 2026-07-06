@@ -97,11 +97,30 @@ public class FtpClient {
         try {
             String dir = FilePathUtils.extractDirectory(path);
             String name = FilePathUtils.extractFileName(path);
-            if (!client.changeWorkingDirectory(dir)) {
-                log.debug("exists: changeWorkingDirectory failed for {}", dir);
-                return false;
+            // 记录当前 CWD，操作完成后恢复
+            String originalCwd = null;
+            try {
+                originalCwd = client.printWorkingDirectory();
+            } catch (IOException ignored) {
+                // 部分 FTP 服务器可能不支持 PWD，降级为不恢复
             }
-            return fileExists(name);
+            boolean success = false;
+            try {
+                if (!client.changeWorkingDirectory(dir)) {
+                    log.debug("exists: changeWorkingDirectory failed for {}", dir);
+                    return false;
+                }
+                success = fileExists(name);
+            } finally {
+                if (originalCwd != null) {
+                    try {
+                        client.changeWorkingDirectory(originalCwd);
+                    } catch (IOException ignored) {
+                        // 恢复 CWD 失败不阻断
+                    }
+                }
+            }
+            return success;
         } catch (IOException e) {
             handleConnectionFailure();
             log.error("Failed to check file existence: {}", path, e);
@@ -188,13 +207,28 @@ public class FtpClient {
             String dir = lastSlash >= 0 ? path.substring(0, lastSlash) : ".";
             String pattern = lastSlash >= 0 ? path.substring(lastSlash + 1) : path;
 
-            if (!client.changeWorkingDirectory(dir)) {
-                log.warn("listFiles: changeWorkingDirectory failed for {}", dir);
-                return new String[0];
+            // 记录当前 CWD，操作完成后恢复
+            String originalCwd = null;
+            try {
+                originalCwd = client.printWorkingDirectory();
+            } catch (IOException ignored) {
             }
+            try {
+                if (!client.changeWorkingDirectory(dir)) {
+                    log.warn("listFiles: changeWorkingDirectory failed for {}", dir);
+                    return new String[0];
+                }
 
-            String[] files = client.listNames(pattern);
-            return files != null ? files : new String[0];
+                String[] files = client.listNames(pattern);
+                return files != null ? files : new String[0];
+            } finally {
+                if (originalCwd != null) {
+                    try {
+                        client.changeWorkingDirectory(originalCwd);
+                    } catch (IOException ignored) {
+                    }
+                }
+            }
         } catch (IOException e) {
             handleConnectionFailure();
             log.error("Failed to list files: {}", path, e);
@@ -301,10 +335,24 @@ public class FtpClient {
             // 部分 FTP 服务器不支持 MLST,降级到 LIST
             String dir = FilePathUtils.extractDirectory(filePath);
             String name = FilePathUtils.extractFileName(filePath);
-            if (!client.changeWorkingDirectory(dir)) return -1;
-            FTPFile[] list = client.listFiles(name);
-            if (list == null || list.length == 0) return -1;
-            return list[0].getSize();
+            String originalCwd = null;
+            try {
+                originalCwd = client.printWorkingDirectory();
+            } catch (IOException ignored) {
+            }
+            try {
+                if (!client.changeWorkingDirectory(dir)) return -1;
+                FTPFile[] list = client.listFiles(name);
+                if (list == null || list.length == 0) return -1;
+                return list[0].getSize();
+            } finally {
+                if (originalCwd != null) {
+                    try {
+                        client.changeWorkingDirectory(originalCwd);
+                    } catch (IOException ignored) {
+                    }
+                }
+            }
         }
         return file.getSize();
     }

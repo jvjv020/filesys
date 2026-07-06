@@ -23,20 +23,29 @@ public class AuditService {
 
     /**
      * 执行预审计 — 返回实际记录数，-1 表示审计不通过。
-     *
-     * @param scenario  场景类型
-     * @param source    数据源（上传为FTP信息，下载为表名）
-     * @param auditCount 期望的记录数
-     * @return 实际记录数（通过时）；-1（不通过或异常）
+     * 使用默认数据库。
      */
     public int preAudit(AuditScenario scenario, Object source, int auditCount) {
+        return preAudit(scenario, source, auditCount, ColumnNames.DEFAULT_DB);
+    }
+
+    /**
+     * 执行预审计 — 返回实际记录数，-1 表示审计不通过。
+     *
+     * @param scenario   场景类型
+     * @param source     数据源（上传为FTP信息，下载为表名）
+     * @param auditCount 期望的记录数
+     * @param dbName     数据库配置名，用于 COUNT 查询
+     * @return 实际记录数（通过时）；-1（不通过或异常）
+     */
+    public int preAudit(AuditScenario scenario, Object source, int auditCount, String dbName) {
         if (auditCount < 0) {
-            return auditCount; // 负数表示不审计，返回原值
+            return auditCount;
         }
         try {
             return switch (scenario) {
                 case UPLOAD -> preAuditFileRecords(source, auditCount);
-                case DOWNLOAD -> preAuditDbRecords(source, auditCount);
+                case DOWNLOAD -> preAuditDbRecords(source, auditCount, dbName);
             };
         } catch (Exception e) {
             log.error("Pre-audit failed: {}", e.getMessage(), e);
@@ -46,8 +55,17 @@ public class AuditService {
 
     /**
      * 分桶场景预审计 — 返回实际记录数，-1 表示审计不通过。
+     * 使用默认数据库。
      */
     public int preAuditByBucket(String tableName, String splitField, String fieldValue, int auditCount) {
+        return preAuditByBucket(tableName, splitField, fieldValue, auditCount, ColumnNames.DEFAULT_DB);
+    }
+
+    /**
+     * 分桶场景预审计 — 返回实际记录数，-1 表示审计不通过。
+     */
+    public int preAuditByBucket(String tableName, String splitField, String fieldValue,
+                                 int auditCount, String dbName) {
         if (auditCount < 0) {
             return auditCount;
         }
@@ -55,10 +73,10 @@ public class AuditService {
             if (splitField == null || splitField.isEmpty()
                     || fieldValue == null || fieldValue.isEmpty()) {
                 log.warn("preAuditByBucket missing splitField/fieldValue, falling back to whole-table count");
-                return preAudit(AuditScenario.DOWNLOAD, tableName, auditCount);
+                return preAudit(AuditScenario.DOWNLOAD, tableName, auditCount, dbName);
             }
             int count = targetTableRepository.countByBucket(
-                    ColumnNames.DEFAULT_DB, tableName, splitField, fieldValue);
+                    dbName, tableName, splitField, fieldValue);
             boolean passed = count == auditCount;
             log.info("Pre-audit by bucket: splitField={}, value={}, expected={}, actual={}, passed={}",
                     splitField, fieldValue, auditCount, count, passed);
@@ -78,20 +96,30 @@ public class AuditService {
 
     /**
      * 执行后审计 — 传入已知 DB 记录数，避免内部重复 COUNT。
-     *
-     * @param scenario    场景类型
-     * @param ftpName     FTP配置名
-     * @param source      数据源（表名）
-     * @param target      目标（文件路径）
-     * @param knownDbCount 已知的 DB 记录数，&lt;0 时内部重新 COUNT
-     * @return true=审计通过
+     * 使用默认数据库。
      */
     public boolean postAudit(AuditScenario scenario, String ftpName, Object source, Object target,
                              int knownDbCount) {
+        return postAudit(scenario, ftpName, source, target, knownDbCount, ColumnNames.DEFAULT_DB);
+    }
+
+    /**
+     * 执行后审计 — 传入已知 DB 记录数，避免内部重复 COUNT。
+     *
+     * @param scenario     场景类型
+     * @param ftpName      FTP配置名
+     * @param source       数据源（表名）
+     * @param target       目标（文件路径）
+     * @param knownDbCount 已知的 DB 记录数，&lt;0 时内部重新 COUNT
+     * @param dbName       数据库配置名，用于 COUNT 查询
+     * @return true=审计通过
+     */
+    public boolean postAudit(AuditScenario scenario, String ftpName, Object source, Object target,
+                             int knownDbCount, String dbName) {
         try {
             return switch (scenario) {
-                case UPLOAD -> postAuditUpload(ftpName, source, target);
-                case DOWNLOAD -> postAuditDownload(ftpName, source, target, knownDbCount);
+                case UPLOAD -> postAuditUpload(ftpName, source, target, dbName);
+                case DOWNLOAD -> postAuditDownload(ftpName, source, target, knownDbCount, dbName);
             };
         } catch (Exception e) {
             log.error("Post-audit failed: {}", e.getMessage(), e);
@@ -115,9 +143,9 @@ public class AuditService {
         return -1;
     }
 
-    private int preAuditDbRecords(Object source, int auditCount) {
+    private int preAuditDbRecords(Object source, int auditCount, String dbName) {
         String tableName = (String) source;
-        int count = targetTableRepository.count(ColumnNames.DEFAULT_DB, tableName);
+        int count = targetTableRepository.count(dbName, tableName);
         boolean passed = count == auditCount;
         log.info("Pre-audit db records, expected: {}, actual: {}, passed={}", auditCount, count, passed);
         return passed ? count : -1;
@@ -125,20 +153,20 @@ public class AuditService {
 
     // ==================== 后审计实现 ====================
 
-    private boolean postAuditUpload(String ftpName, Object fileSource, Object dbTarget) throws Exception {
+    private boolean postAuditUpload(String ftpName, Object fileSource, Object dbTarget, String dbName) throws Exception {
         int fileRecords = getFileRecordCount(ftpName, fileSource);
         String tableName = (String) dbTarget;
-        int dbCount = targetTableRepository.count(ColumnNames.DEFAULT_DB, tableName);
+        int dbCount = targetTableRepository.count(dbName, tableName);
         boolean passed = fileRecords == dbCount;
         log.info("Post-audit upload, file records: {}, db records: {}, passed={}", fileRecords, dbCount, passed);
         return passed;
     }
 
     private boolean postAuditDownload(String ftpName, Object dbSource, Object fileTarget,
-                                      int knownDbCount) throws Exception {
+                                      int knownDbCount, String dbName) throws Exception {
         String tableName = (String) dbSource;
         int dbCount = knownDbCount >= 0 ? knownDbCount
-                : targetTableRepository.count(ColumnNames.DEFAULT_DB, tableName);
+                : targetTableRepository.count(dbName, tableName);
         int fileRecords = getFileRecordCount(ftpName, fileTarget);
         boolean passed = dbCount == fileRecords;
         log.info("Post-audit download, db records: {}, file records: {}, passed={}", dbCount, fileRecords, passed);

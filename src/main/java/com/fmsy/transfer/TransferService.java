@@ -90,9 +90,13 @@ public class TransferService {
             } else if (Result.DIRECTION_DOWNLOAD.equals(direction)) {
                 // S型子命令由DetailPollingService处理
                 if (command.getCommandType() == CommandType.COORDINATED) {
-                    // S型子命令的extraInfo存储的是主命令ID
+                    // 迭代 #17:extraInfo 格式为 "mainId|baseFilePath",需提取前半段作为主命令ID
+                    String extraInfo = command.getExtraInfo();
+                    String mainCommandId = extraInfo != null && extraInfo.contains("|")
+                            ? extraInfo.substring(0, extraInfo.indexOf('|'))
+                            : extraInfo;
                     detailPollingService.pollAndProcess(appConfig.getNodeId(),
-                            command.getExtraInfo(), command);
+                            mainCommandId, command);
                 } else {
                     downloadOrchestrator.execute(command, config);
                 }

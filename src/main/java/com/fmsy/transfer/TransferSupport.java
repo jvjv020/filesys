@@ -66,15 +66,7 @@ public class TransferSupport {
         }
         if (splitFields != null && !splitFields.isEmpty()
                 && fieldValue != null && !fieldValue.isEmpty()) {
-            String[] names = splitFields.split(",");
-            String[] values = fieldValue.split(",");
-            for (int i = 0; i < names.length && i < values.length; i++) {
-                String n = names[i].trim();
-                String v = values[i].trim();
-                if (!n.isEmpty()) {
-                    context.put(n, v);
-                }
-            }
+            context.putAll(TransferUtils.splitFieldValues(splitFields, fieldValue));
         }
         return context;
     }

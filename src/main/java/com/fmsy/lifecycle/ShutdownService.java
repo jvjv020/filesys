@@ -37,8 +37,8 @@ public class ShutdownService {
     private final AtomicInteger activeTaskCount = new AtomicInteger(0);
     /** 任务计数归零的同步锁与等待者 */
     private final Object completionLock = new Object();
-    /** 关闭等待超时秒数（默认30秒，可由appConfig覆盖） */
-    private int timeoutSeconds = 30;
+    /** 关闭等待超时秒数（默认300秒=5分钟，可由appConfig.taskTimeoutHours覆盖） */
+    private int timeoutSeconds = 300;
 
     /**
      * 设置关闭超时（可选注入，@Autowired可选依赖）

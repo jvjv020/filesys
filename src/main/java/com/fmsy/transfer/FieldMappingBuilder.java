@@ -5,6 +5,7 @@ import com.fmsy.converter.FileConverter;
 import com.fmsy.db.TableMetadataService;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.TransferConfig;
+import com.fmsy.transfer.TransferUtils;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ParserConfigUtil;
 import lombok.RequiredArgsConstructor;
@@ -62,11 +63,13 @@ public class FieldMappingBuilder {
      * @return 完整 FieldMapping
      */
     public FieldMapping buildForUpload(TransferConfig config, Map<String, Object> detail) {
-        FieldMapping mapping = new FieldMapping();
-        mapping.setConfig(applyParserConfig(config));
         if (config == null) {
+            FieldMapping mapping = new FieldMapping();
+            mapping.setConfig(null);
             return mapping;
         }
+        FieldMapping mapping = new FieldMapping();
+        mapping.setConfig(applyParserConfig(config));
         List<String> columns = tableMetadataService.getTableColumns(config.getDbName(), config.getTableName());
         // 排除 ignoreFields
         columns = excludeFields(columns, config.getIgnoreFields());
@@ -89,11 +92,13 @@ public class FieldMappingBuilder {
      * 构建下发场景的 FieldMapping。
      */
     public FieldMapping buildForDownload(TransferConfig config) {
-        FieldMapping mapping = new FieldMapping();
-        mapping.setConfig(applyParserConfig(config));
         if (config == null) {
+            FieldMapping mapping = new FieldMapping();
+            mapping.setConfig(null);
             return mapping;
         }
+        FieldMapping mapping = new FieldMapping();
+        mapping.setConfig(applyParserConfig(config));
         List<String> columns = tableMetadataService.getTableColumns(config.getDbName(), config.getTableName());
         columns = excludeFields(columns, config.getIgnoreFields());
         mapping.setTableFields(new ArrayList<>(columns));
@@ -178,21 +183,10 @@ public class FieldMappingBuilder {
     }
 
     private Map<String, String> extractExtraFields(Map<String, Object> detail) {
-        Map<String, String> extras = new LinkedHashMap<>();
         Object namesObj = detail.get(ColumnNames.FIELD_NAME);
         Object valuesObj = detail.get(ColumnNames.FIELD_VALUE);
         if (namesObj == null || valuesObj == null) {
-            return extras;
+            return new LinkedHashMap<>();
         }
-        String[] names = String.valueOf(namesObj).split(",");
-        String[] values = String.valueOf(valuesObj).split(",");
-        int len = Math.min(names.length, values.length);
-        for (int i = 0; i < len; i++) {
-            String n = names[i].trim();
-            String v = values[i].trim();
-            if (!n.isEmpty()) {
-                extras.put(n, v);
-            }
-        }
-        return extras;
+        return TransferUtils.splitFieldValues(String.valueOf(namesObj), String.valueOf(valuesObj));
     }

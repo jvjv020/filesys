@@ -66,9 +66,9 @@ public class FlagFileService {
     }
 
     public FlagFileService(MessageSender messageSender) {
-        operations.put("SUB", new GenerateOp("sub flag"));
-        operations.put("FB", new GenerateOp("feedback"));
-        operations.put("TOTAL", new GenerateOp("total flag"));
+        operations.put("SUB", new GenerateOp("sub flag", contentEngine));
+        operations.put("FB", new GenerateOp("feedback", contentEngine));
+        operations.put("TOTAL", new GenerateOp("total flag", contentEngine));
         operations.put("DEL", new DeleteOp());
         operations.put("REN", new RenameOp());
         operations.put("MSG", new SendMessageOp(messageSender));
@@ -481,9 +481,11 @@ public class FlagFileService {
     @Slf4j
     static class GenerateOp implements FlagOperation {
         private final String flagType;
+        private final ContentEngine contentEngine;
 
-        GenerateOp(String flagType) {
+        GenerateOp(String flagType, ContentEngine contentEngine) {
             this.flagType = flagType;
+            this.contentEngine = contentEngine;
         }
 
         @Override
@@ -498,18 +500,16 @@ public class FlagFileService {
 
             // 路径继承 + .. 规范化
             if (fileInfo != null && !filePattern.startsWith("/")) {
-                ContentEngine ce = new ContentEngine();
-                filePattern = ce.expandPathVariables(filePattern, fileInfo);
+                filePattern = contentEngine.expandPathVariables(filePattern, fileInfo);
                 filePattern = normalizePath(fileInfo.dir() + "/" + filePattern);
             }
 
             // 内容模式码展开
-            ContentEngine ce = new ContentEngine();
             String lines = extraValues != null ? extraValues.get("L") : null;
             String size = extraValues != null ? extraValues.get("S") : null;
             String md5 = extraValues != null ? extraValues.get("M") : null;
             String count = extraValues != null ? extraValues.get("C") : null;
-            String resolvedContent = ce.expand(content, fileInfo, lines, size, md5, count, client);
+            String resolvedContent = contentEngine.expand(content, fileInfo, lines, size, md5, count, client);
 
             try (OutputStream os = client.getOutputStream(filePattern)) {
                 byte[] bytes = resolvedContent.getBytes(StandardCharsets.UTF_8);
