@@ -180,6 +180,19 @@ public class UploadSupport {
         return record.keySet().stream().toList();
     }
 
+    /**
+     * 清表操作 — 在事务中清空目标表。
+     *
+     * <p>由 SingleUploadHandler / MultiDirectoryUploadHandler / MultiBatchUploadHandler
+     * 在 clearTableFlag=Y 时调用，避免各 Handler 直接依赖 TargetTableRepository 和 DbPool。
+     */
+    public void truncateTable(TransferConfig config) {
+        dbPool.getTransactionTemplate(config.getDbName()).execute(status -> {
+            targetTableRepository.truncate(config.getDbName(), config.getTableName());
+            return null;
+        });
+    }
+
     // ==================== 跨场景主状态判定 ====================
 
     public record UploadResult(int records, int successCount, int skippedCount, int failedCount) {

@@ -9,7 +9,6 @@ import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.DetailRepository;
-import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
@@ -34,7 +33,6 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class MultiBatchUploadHandler implements TransferHandler {
 
-    private final TargetTableRepository targetTableRepository;
     private final DetailRepository detailRepository;
     private final FieldMappingBuilder fieldMappingBuilder;
     private final PlaceholderResolver placeholderResolver;
@@ -62,7 +60,7 @@ public class MultiBatchUploadHandler implements TransferHandler {
             }
 
             if (BooleanUtils.isYes(config.getClearTableFlag())) {
-                targetTableRepository.truncate(config.getDbName(), config.getTableName());
+                support.truncateTable(config);
             }
 
             int totalRecords = 0;

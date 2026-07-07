@@ -11,7 +11,6 @@ import com.fmsy.model.Command;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
-import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
@@ -41,7 +40,6 @@ import java.util.function.IntFunction;
 @RequiredArgsConstructor
 public class MultiDirectoryUploadHandler implements TransferHandler {
 
-    private final TargetTableRepository targetTableRepository;
     private final FieldMappingBuilder fieldMappingBuilder;
     private final UploadSupport support;
     private final TransferSupport transferSupport;
@@ -81,7 +79,7 @@ public class MultiDirectoryUploadHandler implements TransferHandler {
 
         // Phase 2: DB truncate + parallel file upload
         if (BooleanUtils.isYes(config.getClearTableFlag())) {
-            targetTableRepository.truncate(config.getDbName(), config.getTableName());
+            support.truncateTable(config);
         }
 
         int concurrency = config.getConcurrency() != null ? config.getConcurrency() : 3;
@@ -132,7 +130,7 @@ public class MultiDirectoryUploadHandler implements TransferHandler {
         if (failedCount > 0 && config.getEmptyDataHandling() == EmptyDataHandling.ERROR) {
             if (BooleanUtils.isYes(config.getClearTableFlag())) {
                 try {
-                    targetTableRepository.truncate(config.getDbName(), config.getTableName());
+                    support.truncateTable(config);
                     log.error("Rolled back table {} due to {} failed file(s) post-audit",
                             config.getTableName(), failedCount);
                 } catch (Exception ex) {
