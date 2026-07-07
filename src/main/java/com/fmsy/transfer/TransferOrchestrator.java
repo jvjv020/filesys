@@ -12,8 +12,7 @@ import com.fmsy.transfer.download.ChildCommandMonitor;
 import com.fmsy.transfer.download.MultiNodeDownloadHandler;
 import com.fmsy.transfer.download.SingleDownloadHandler;
 import com.fmsy.transfer.download.SingleNodeDownloadHandler;
-import com.fmsy.transfer.upload.MultiBatchUploadHandler;
-import com.fmsy.transfer.upload.MultiDirectoryUploadHandler;
+import com.fmsy.transfer.upload.MultiUploadHandler;
 import com.fmsy.transfer.upload.SingleUploadHandler;
 import org.springframework.stereotype.Service;
 
@@ -30,15 +29,13 @@ import org.springframework.stereotype.Service;
 public class TransferOrchestrator extends AbstractTransferOrchestrator {
 
     private final SingleUploadHandler singleUpload;
-    private final MultiDirectoryUploadHandler multiDirUpload;
-    private final MultiBatchUploadHandler multiBatchUpload;
+    private final MultiUploadHandler multiUpload;
     private final SingleDownloadHandler singleDownload;
     private final SingleNodeDownloadHandler singleNodeDownload;
     private final MultiNodeDownloadHandler multiNodeDownload;
 
     public TransferOrchestrator(SingleUploadHandler singleUpload,
-                                MultiDirectoryUploadHandler multiDirUpload,
-                                MultiBatchUploadHandler multiBatchUpload,
+                                MultiUploadHandler multiUpload,
                                 SingleDownloadHandler singleDownload,
                                 SingleNodeDownloadHandler singleNodeDownload,
                                 MultiNodeDownloadHandler multiNodeDownload,
@@ -48,8 +45,7 @@ public class TransferOrchestrator extends AbstractTransferOrchestrator {
                                 DataSourceConfig.DbPool dbPool) {
         super(commandRepository, resultRepository, childCommandMonitor, dbPool);
         this.singleUpload = singleUpload;
-        this.multiDirUpload = multiDirUpload;
-        this.multiBatchUpload = multiBatchUpload;
+        this.multiUpload = multiUpload;
         this.singleDownload = singleDownload;
         this.singleNodeDownload = singleNodeDownload;
         this.multiNodeDownload = multiNodeDownload;
@@ -65,11 +61,7 @@ public class TransferOrchestrator extends AbstractTransferOrchestrator {
                 singleUpload.handle(command, config, result);
                 break;
             case UPLOAD_MULTI:
-                if (commandType == CommandType.BATCH) {
-                    multiBatchUpload.handle(command, config, result);
-                } else {
-                    multiDirUpload.handle(command, config, result);
-                }
+                multiUpload.handle(command, config, result);
                 break;
             case DOWNLOAD_SINGLE:
                 singleDownload.handle(command, config, result);
