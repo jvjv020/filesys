@@ -52,7 +52,6 @@ public class SingleNodeDownloadHandler implements TransferHandler {
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
         log.info("Single node multi-file download");
-        String nodeId = config.getNodeId();
         CommandType commandType = command.getCommandType();
 
         // ===== Phase 1: splitFields + 顶层 preCheck =====
@@ -112,7 +111,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         try {
             for (Detail bucket : buckets) {
                 bucketExecutor.execute(() -> processBucketParallel(
-                        bucket, command, config, nodeId, baseFileInfo, postOps,
+                        bucket, command, config, baseFileInfo,
                         bucketResult, generatedFiles));
             }
         } finally {
@@ -174,7 +173,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
      * 并行处理单个桶(bucketExecutor 线程池线程中执行)
      */
     private void processBucketParallel(Detail bucket, Command command, TransferConfig config,
-                                        String nodeId, ResolvedPath baseFileInfo, String postOps,
+                                        ResolvedPath baseFileInfo,
                                         BucketResult result, ConcurrentLinkedQueue<String> generatedFiles) {
         String fieldValue = bucket.getFieldValue();
         Map<String, String> context = transferSupport.buildContext(
@@ -187,13 +186,13 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         // Phase 1: DB-only checks (no FTP client held)
         int recordCount = resolveBucketRecordCount(command, config, bucket, fieldValue);
         if (recordCount < 0) {
-            markBucketFailed(result, bucket, nodeId);
+            markBucketFailed(result, bucket, config);
             return;
         }
 
         if (!transferSupport.handleEmptyData(recordCount, config.getEmptyDataHandling())) {
             boolean isError = config.getEmptyDataHandling() == EmptyDataHandling.ERROR;
-            markBucketFailed(result, bucket, nodeId, isError);
+            markBucketFailed(result, bucket, config, isError);
             if (!isError) result.skippedCount++;
             return;
         }
@@ -214,15 +213,15 @@ public class SingleNodeDownloadHandler implements TransferHandler {
             // 每桶 sub-flag
             Map<String, String> extra = new HashMap<>();
             extra.put("C", String.valueOf(recordCount));
-            String subFlagOnly = FlagFileService.filterOpsByType(postOps, "SUB");
+            String subFlagOnly = FlagFileService.filterOpsByType(config.getPostOperations(), "SUB");
             flagFileService.process(client, subFlagOnly, targetFileInfo, extra);
 
-            support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_SUCCESS, nodeId);
+            support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_SUCCESS, config.getNodeId());
             log.info("Downloaded file for bucket value: {}", fieldValue);
             result.totalRecordCount += recordCount;
         } catch (Exception e) {
             log.error("Bucket processing crashed: {}", fieldValue, e);
-            markBucketFailed(result, bucket, nodeId);
+            markBucketFailed(result, bucket, config);
         } finally {
             client.close();
         }
@@ -243,13 +242,14 @@ public class SingleNodeDownloadHandler implements TransferHandler {
                 config.getDbName(), config.getTableName(), config.getSplitFields(), fieldValue);
     }
 
-    private void markBucketFailed(BucketResult result, Detail bucket, String nodeId) {
-        markBucketFailed(result, bucket, nodeId, true);
+    private void markBucketFailed(BucketResult result, Detail bucket, TransferConfig config) {
+        markBucketFailed(result, bucket, config, true);
     }
 
-    private void markBucketFailed(BucketResult result, Detail bucket, String nodeId, boolean isError) {
+    private void markBucketFailed(BucketResult result, Detail bucket, TransferConfig config, boolean isError) {
         result.allSuccess = false;
         if (isError) result.failedCount++;
-        support.updateDetailStatusForBucket(bucket, isError ? ColumnNames.STATUS_ERROR : ColumnNames.STATUS_SKIPPED, nodeId);
+        support.updateDetailStatusForBucket(bucket,
+                isError ? ColumnNames.STATUS_ERROR : ColumnNames.STATUS_SKIPPED, config.getNodeId());
     }
 }
