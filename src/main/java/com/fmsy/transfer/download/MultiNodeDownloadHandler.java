@@ -2,8 +2,6 @@ package com.fmsy.transfer.download;
 
 import com.fmsy.config.DataSourceConfig;
 import com.fmsy.enums.CommandType;
-import com.fmsy.ftp.FtpClient;
-import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
 import com.fmsy.model.Result;
@@ -46,7 +44,6 @@ public class MultiNodeDownloadHandler implements TransferHandler {
     private final DetailRepository detailRepository;
     private final TargetTableRepository targetTableRepository;
     private final TransferSupport transferSupport;
-    private final FtpPool ftpPool;
     private final DataSourceConfig.DbPool dbPool;
 
     @Override
@@ -63,17 +60,14 @@ public class MultiNodeDownloadHandler implements TransferHandler {
         }
 
         // Phase 1: preCheck with short-lived FTP client
-        {
-            FtpClient client = ftpPool.getClient(config.getFtpName());
-            try {
-                if (!transferSupport.preCheck(client, config, baseFileInfo)) {
-                    result.markChildrenFailed("Pre-check failed");
-                    return;
-                }
-            } finally {
-                client.close();
+        boolean preCheckOk = transferSupport.executeWithClient(config.getFtpName(), client -> {
+            if (!transferSupport.preCheck(client, config, baseFileInfo)) {
+                result.markChildrenFailed("Pre-check failed");
+                return false;
             }
-        }
+            return true;
+        });
+        if (!preCheckOk) return;
 
         // Phase 2: DB-only work (no FTP client held)
         CommandType commandType = command.getCommandType();
