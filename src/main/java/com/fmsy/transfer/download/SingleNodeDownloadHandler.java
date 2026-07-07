@@ -1,7 +1,6 @@
 package com.fmsy.transfer.download;
 
 import com.fmsy.converter.ConverterFactory;
-import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.CommandType;
 import com.fmsy.enums.EmptyDataHandling;
 import com.fmsy.fileops.FlagFileService;
@@ -9,7 +8,6 @@ import com.fmsy.ftp.FtpClient;
 import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
-import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.TargetTableRepository;
@@ -33,8 +31,6 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntFunction;
 
 /**
@@ -109,11 +105,8 @@ public class SingleNodeDownloadHandler implements TransferHandler {
             }
         }
 
-        // ===== Phase 4: 并行桶处理 =====
-        AtomicInteger totalRecordCount = new AtomicInteger(0);
-        AtomicInteger failedCount = new AtomicInteger(0);
-        AtomicInteger skippedCount = new AtomicInteger(0);
-        AtomicBoolean allFilesSuccess = new AtomicBoolean(true);
+    // ===== Phase 4: 并行桶处理 =====
+        BucketResult bucketResult = new BucketResult();
         ConcurrentLinkedQueue<String> generatedFiles = new ConcurrentLinkedQueue<>();
 
         ExecutorService bucketExecutor = batchExecutorFactory.apply(Math.max(1, buckets.size()));
@@ -121,23 +114,14 @@ public class SingleNodeDownloadHandler implements TransferHandler {
             for (Detail bucket : buckets) {
                 bucketExecutor.execute(() -> processBucketParallel(
                         bucket, command, config, nodeId, baseFileInfo, postOps,
-                        totalRecordCount, failedCount, skippedCount, allFilesSuccess, generatedFiles));
+                        bucketResult, generatedFiles));
             }
-            bucketExecutor.shutdown();
-            if (!bucketExecutor.awaitTermination(1, TimeUnit.HOURS)) {
-                log.error("Bucket processing timed out for command: {}", command.getId());
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.error("Bucket processing interrupted for command: {}", command.getId());
         } finally {
-            if (!bucketExecutor.isTerminated()) {
-                bucketExecutor.shutdownNow();
-            }
+            shutdownExecutor(bucketExecutor, command.getId());
         }
 
         // ===== Phase 5: 总标志文件(仅在所有桶成功时生成) =====
-        if (allFilesSuccess.get() && postOps != null && postOps.contains("TOTAL")) {
+        if (bucketResult.allSuccess && postOps != null && postOps.contains("TOTAL")) {
             transferSupport.executeWithClient(config.getFtpName(), postClient -> {
                 String totalFlagOps = FlagFileService.filterOpsByType(postOps, "TOTAL");
                 flagFileService.process(postClient, totalFlagOps, baseFileInfo, null);
@@ -157,14 +141,34 @@ public class SingleNodeDownloadHandler implements TransferHandler {
                     }
                     return null;
                 });
-                allFilesSuccess.set(false);
-                failedCount.incrementAndGet();
+                bucketResult.allSuccess = false;
+                bucketResult.failedCount++;
             }
         }
 
-        DownloadSupport.BucketSummary summary = new DownloadSupport.BucketSummary(
-                totalRecordCount.get(), allFilesSuccess.get(), failedCount.get(), skippedCount.get());
-        result.setOutcome(summary.totalRecords(), DownloadSupport.determineMainStatus(summary), "");
+        result.setOutcome(bucketResult.totalRecordCount,
+                DownloadSupport.determineMainStatus(bucketResult.allSuccess,
+                        bucketResult.failedCount, bucketResult.skippedCount), "");
+    }
+
+    private static void shutdownExecutor(ExecutorService executor, Long commandId) {
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(1, TimeUnit.HOURS)) {
+                log.error("Bucket processing timed out for command: {}", commandId);
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            executor.shutdownNow();
+        }
+    }
+
+    private static class BucketResult {
+        volatile int totalRecordCount;
+        volatile int failedCount;
+        volatile int skippedCount;
+        volatile boolean allSuccess = true;
     }
 
     /**
@@ -172,9 +176,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
      */
     private void processBucketParallel(Detail bucket, Command command, TransferConfig config,
                                         String nodeId, ResolvedPath baseFileInfo, String postOps,
-                                        AtomicInteger totalRecordCount, AtomicInteger failedCount,
-                                        AtomicInteger skippedCount, AtomicBoolean allFilesSuccess,
-                                        ConcurrentLinkedQueue<String> generatedFiles) {
+                                        BucketResult result, ConcurrentLinkedQueue<String> generatedFiles) {
         String fieldValue = bucket.getFieldValue();
         Map<String, String> context = transferSupport.buildContext(
                 null, config.getSplitFields(), fieldValue);
@@ -192,8 +194,8 @@ public class SingleNodeDownloadHandler implements TransferHandler {
                 recordCount = support.preAuditByBucket(config, detailAuditCount, fieldValue);
                 if (recordCount < 0) {
                     log.error("Pre-audit failed for bucket value: {}", fieldValue);
-                    allFilesSuccess.set(false);
-                    failedCount.incrementAndGet();
+                    result.allSuccess = false;
+                    result.failedCount++;
                     support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_ERROR, nodeId);
                     return;
                 }
@@ -206,14 +208,13 @@ public class SingleNodeDownloadHandler implements TransferHandler {
 
         EmptyDataHandling emptyHandling = config.getEmptyDataHandling();
         if (!transferSupport.handleEmptyData(recordCount, emptyHandling)) {
-            // handleEmptyData 仅在 ERROR 或 SKIP 时返回 false，else 分支不可达
             if (emptyHandling == EmptyDataHandling.ERROR) {
-                allFilesSuccess.set(false);
-                failedCount.incrementAndGet();
+                result.allSuccess = false;
+                result.failedCount++;
                 support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_ERROR, nodeId);
             } else { // SKIP
-                allFilesSuccess.set(false);
-                skippedCount.incrementAndGet();
+                result.allSuccess = false;
+                result.skippedCount++;
                 support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_SKIPPED, nodeId);
             }
             return;
@@ -222,8 +223,8 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         // Phase 2: FTP operations (borrow client just before use)
         FtpClient client = ftpPool.getClient(config.getFtpName());
         try {
-            FileConverter converter = ConverterFactory.get(config.getParserType());
-            FieldMapping mapping = fieldMappingBuilder.buildForDownload(config);
+            var converter = ConverterFactory.get(config.getParserType());
+            var mapping = fieldMappingBuilder.buildForDownload(config);
             try (var data = targetTableRepository.streamBucketData(
                     config.getDbName(), config.getTableName(), config.getSplitFields(), fieldValue);
                  OutputStream os = client.getOutputStream(targetFileInfo.fullPath())) {
@@ -231,8 +232,8 @@ public class SingleNodeDownloadHandler implements TransferHandler {
                 client.completePendingCommand();
             } catch (IOException e) {
                 log.error("Failed to generate file for bucket {}: {}", fieldValue, e.getMessage(), e);
-                allFilesSuccess.set(false);
-                failedCount.incrementAndGet();
+                result.allSuccess = false;
+                result.failedCount++;
                 support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_ERROR, nodeId);
                 return;
             }
@@ -246,11 +247,11 @@ public class SingleNodeDownloadHandler implements TransferHandler {
 
             support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_SUCCESS, nodeId);
             log.info("Downloaded file for bucket value: {}", fieldValue);
-            totalRecordCount.addAndGet(recordCount);
+            result.totalRecordCount += recordCount;
         } catch (Exception e) {
             log.error("Bucket processing crashed: {}", fieldValue, e);
-            allFilesSuccess.set(false);
-            failedCount.incrementAndGet();
+            result.allSuccess = false;
+            result.failedCount++;
             support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_ERROR, nodeId);
         } finally {
             client.close();
