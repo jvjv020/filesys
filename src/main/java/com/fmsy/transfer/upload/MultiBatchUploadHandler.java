@@ -12,7 +12,6 @@ import com.fmsy.repository.DetailRepository;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
-import com.fmsy.transfer.placeholder.PlaceholderResolver;
 import com.fmsy.util.BooleanUtils;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
@@ -35,7 +34,6 @@ public class MultiBatchUploadHandler implements TransferHandler {
 
     private final DetailRepository detailRepository;
     private final FieldMappingBuilder fieldMappingBuilder;
-    private final PlaceholderResolver placeholderResolver;
     private final UploadSupport support;
     private final TransferSupport transferSupport;
 
@@ -150,7 +148,7 @@ public class MultiBatchUploadHandler implements TransferHandler {
         String detailFieldValue = (String) detail.get(ColumnNames.FIELD_VALUE);
         Map<String, String> detailContext = transferSupport.buildContext(
                 command, detailFieldName, detailFieldValue);
-        String resolvedDir = placeholderResolver.resolve(config.getFilePath(), detailContext);
+        String resolvedDir = transferSupport.resolveFilePath(config.getFilePath(), detailContext).fullPath();
         return ResolvedPath.of(resolvedDir + "/" + fileName);
     }
 }
