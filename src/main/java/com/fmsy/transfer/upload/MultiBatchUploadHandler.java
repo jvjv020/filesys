@@ -148,7 +148,7 @@ public class MultiBatchUploadHandler implements TransferHandler {
         String detailFieldValue = (String) detail.get(ColumnNames.FIELD_VALUE);
         Map<String, String> detailContext = transferSupport.buildContext(
                 command, detailFieldName, detailFieldValue);
-        String resolvedDir = transferSupport.resolveFilePath(config.getFilePath(), detailContext).fullPath();
-        return ResolvedPath.of(resolvedDir + "/" + fileName);
+        return transferSupport.resolveFilePath(
+                config.getFilePath() + "/" + fileName, detailContext);
     }
 }

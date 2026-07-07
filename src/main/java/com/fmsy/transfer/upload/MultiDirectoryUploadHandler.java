@@ -80,12 +80,9 @@ public class MultiDirectoryUploadHandler implements TransferHandler {
         int skippedCount = 0;
         int failedCount = 0;
         try {
-            List<FileTask> tasks = new ArrayList<>();
             List<Future<Integer>> futures = new ArrayList<>();
             for (String filePath : files) {
-                FileTask task = new FileTask(filePath);
-                tasks.add(task);
-                futures.add(executor.submit(task));
+                futures.add(executor.submit(new FileTask(filePath)));
             }
 
             for (int i = 0; i < futures.size(); i++) {
@@ -100,7 +97,7 @@ public class MultiDirectoryUploadHandler implements TransferHandler {
                         failedCount++;
                     }
                 } catch (Exception e) {
-                    log.error("Failed to upload file: {}", tasks.get(i).getFilePath(), e);
+                    log.error("Failed to upload file: {}", files[i], e);
                     failedCount++;
                 }
             }
@@ -178,10 +175,6 @@ public class MultiDirectoryUploadHandler implements TransferHandler {
         static final int FAIL = -2;
 
         private final String filePath;
-
-        public String getFilePath() {
-            return filePath;
-        }
 
         @Override
         public Integer call() {
