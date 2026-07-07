@@ -70,22 +70,19 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         String postOps = config.getPostOperations();
 
         ResolvedPath baseFileInfo;
-        {
-            FtpClient preClient = ftpPool.getClient(config.getFtpName());
-            try {
-                baseFileInfo = transferSupport.resolveFilePath(config.getFilePath(), command);
-                if (!transferSupport.preCheck(preClient, config, baseFileInfo)) {
-                    result.setOutcome(0, DownloadSupport.determineMainStatus(false, 0, 1), "Pre-check failed");
-                    return;
-                }
-                String parentDir = FilePathUtils.extractParentDirectory(baseFileInfo.fullPath());
-                if (parentDir != null && !parentDir.isEmpty()) {
-                    preClient.mkdirs(parentDir);
-                }
-            } finally {
-                preClient.close();
+        baseFileInfo = transferSupport.resolveFilePath(config.getFilePath(), command);
+        boolean preCheckOk = transferSupport.executeWithClient(config.getFtpName(), client -> {
+            if (!transferSupport.preCheck(client, config, baseFileInfo)) {
+                result.setOutcome(0, DownloadSupport.determineMainStatus(false, 0, 1), "Pre-check failed");
+                return false;
             }
-        }
+            String parentDir = FilePathUtils.extractParentDirectory(baseFileInfo.fullPath());
+            if (parentDir != null && !parentDir.isEmpty()) {
+                client.mkdirs(parentDir);
+            }
+            return true;
+        });
+        if (!preCheckOk) return;
 
         // ===== Phase 2: SERIAL 模式顶层 pre-audit =====
         if (commandType != CommandType.BATCH && command.getAuditCount() != null && command.getAuditCount() >= 0) {
@@ -141,9 +138,10 @@ public class SingleNodeDownloadHandler implements TransferHandler {
 
         // ===== Phase 5: 总标志文件(仅在所有桶成功时生成) =====
         if (allFilesSuccess.get() && postOps != null && postOps.contains("TOTAL")) {
-            ftpPool.withClient(config.getFtpName(), postClient -> {
+            transferSupport.executeWithClient(config.getFtpName(), postClient -> {
                 String totalFlagOps = FlagFileService.filterOpsByType(postOps, "TOTAL");
                 flagFileService.process(postClient, totalFlagOps, baseFileInfo, null);
+                return null;
             });
         }
 
