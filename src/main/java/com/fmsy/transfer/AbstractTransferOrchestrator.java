@@ -1,6 +1,7 @@
 package com.fmsy.transfer;
 
 import com.fmsy.config.DataSourceConfig;
+import com.fmsy.enums.TransferScenario;
 import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
@@ -30,27 +31,24 @@ public abstract class AbstractTransferOrchestrator {
     private final ResultRepository resultRepository;
     private final ChildCommandMonitor childCommandMonitor;
     private final DataSourceConfig.DbPool dbPool;
-    private final String direction;
 
     protected AbstractTransferOrchestrator(CommandRepository commandRepository,
                                            ResultRepository resultRepository,
                                            ChildCommandMonitor childCommandMonitor,
-                                           DataSourceConfig.DbPool dbPool,
-                                           String direction) {
+                                           DataSourceConfig.DbPool dbPool) {
         this.commandRepository = commandRepository;
         this.resultRepository = resultRepository;
         this.childCommandMonitor = childCommandMonitor;
         this.dbPool = dbPool;
-        this.direction = direction;
     }
 
     public final void execute(Command command, TransferConfig config) {
-        log.info("Executing {} for command: {}", direction, command.getId());
-        Result result = newResult();
+        log.info("Executing {} for command: {}", config.getScenario(), command.getId());
+        Result result = newResult(config.getScenario());
         try {
             dispatch(command, config, result);
         } catch (Exception e) {
-            log.error("{} execution failed: {}", direction, e.getMessage(), e);
+            log.error("{} execution failed: {}", config.getScenario(), e.getMessage(), e);
             result.failWith(e);
         } finally {
             finalize(command, config, result);
@@ -95,7 +93,9 @@ public abstract class AbstractTransferOrchestrator {
         }
     }
 
-    private Result newResult() {
+    private Result newResult(TransferScenario scenario) {
+        String direction = scenario.name().startsWith("UPLOAD")
+                ? Result.DIRECTION_UPLOAD : Result.DIRECTION_DOWNLOAD;
         return Result.builder()
                 .transferDirection(direction)
                 .markStart()

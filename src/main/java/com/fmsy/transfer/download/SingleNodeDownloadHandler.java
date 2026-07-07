@@ -4,7 +4,6 @@ import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.CommandType;
 import com.fmsy.enums.EmptyDataHandling;
-import com.fmsy.enums.TransferScenario;
 import com.fmsy.fileops.FlagFileService;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.ftp.FtpPool;
@@ -18,8 +17,6 @@ import com.fmsy.transfer.BucketDistributor;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
-import com.fmsy.transfer.TransferUtils;
-import com.fmsy.transfer.placeholder.PlaceholderResolver;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.FilePathUtils;
 import com.fmsy.util.ResolvedPath;
@@ -46,7 +43,7 @@ import java.util.function.IntFunction;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class SingleNodeDownloadHandler implements DownloadHandler {
+public class SingleNodeDownloadHandler implements TransferHandler {
 
     private final FtpPool ftpPool;
     private final BucketDistributor bucketDistributor;
@@ -56,12 +53,6 @@ public class SingleNodeDownloadHandler implements DownloadHandler {
     private final IntFunction<ExecutorService> batchExecutorFactory;
     private final DownloadSupport support;
     private final TransferSupport transferSupport;
-
-    @Override
-    public boolean supports(TransferScenario scenario, CommandType commandType) {
-        return scenario == TransferScenario.DOWNLOAD_SINGLE_NODE
-                && commandType != CommandType.COORDINATED;
-    }
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
@@ -163,7 +154,7 @@ public class SingleNodeDownloadHandler implements DownloadHandler {
                         command.getId(), generatedFiles.size());
                 transferSupport.executeWithClient(config.getFtpName(), client -> {
                     for (String f : generatedFiles) {
-                        TransferUtils.rollbackAfterPostAuditFailure(client, f,
+                        DownloadSupport.rollbackAfterPostAuditFailure(client, f,
                                 "single-node download post-audit");
                     }
                     return null;

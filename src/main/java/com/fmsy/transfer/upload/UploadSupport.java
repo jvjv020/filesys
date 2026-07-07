@@ -117,7 +117,7 @@ public class UploadSupport {
      *
      * <p>适用于:
      * <ul>
-     *   <li>{@link com.fmsy.transfer.upload.DirectoryUploadTask} — 多目录并发的每个文件</li>
+     *   <li>{@link MultiDirectoryUploadHandler.FileTask} — 多目录并发的每个文件</li>
      *   <li>{@link MultiBatchUploadHandler} — 明细表的每个文件</li>
      *   <li>{@link SingleUploadHandler} — 单文件(清表/增量模式)</li>
      * </ul>
@@ -187,10 +187,8 @@ public class UploadSupport {
     }
 
     public static String determineMainStatus(UploadResult result) {
-        if (result.successCount() > 0) return ColumnNames.STATUS_SUCCESS;
-        if (result.failedCount() > 0 && result.skippedCount() == 0) return ColumnNames.STATUS_ERROR;
-        if (result.skippedCount() > 0) return ColumnNames.STATUS_SKIPPED;
-        return ColumnNames.STATUS_ERROR;
+        boolean allSuccess = result.failedCount() == 0 && result.skippedCount() == 0;
+        return TransferSupport.determineMainStatus(allSuccess, result.failedCount(), result.skippedCount());
     }
 
 }

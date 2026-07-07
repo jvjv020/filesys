@@ -3,8 +3,6 @@ package com.fmsy.transfer.upload;
 import com.fmsy.converter.CloseableIterator;
 import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
-import com.fmsy.enums.CommandType;
-import com.fmsy.enums.TransferScenario;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.model.Command;
 import com.fmsy.model.FieldMapping;
@@ -34,7 +32,7 @@ import java.util.Map;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class MultiBatchUploadHandler implements UploadHandler {
+public class MultiBatchUploadHandler implements TransferHandler {
 
     private final TargetTableRepository targetTableRepository;
     private final DetailRepository detailRepository;
@@ -42,11 +40,6 @@ public class MultiBatchUploadHandler implements UploadHandler {
     private final PlaceholderResolver placeholderResolver;
     private final UploadSupport support;
     private final TransferSupport transferSupport;
-
-    @Override
-    public boolean supports(TransferScenario scenario, CommandType commandType) {
-        return scenario == TransferScenario.UPLOAD_MULTI && commandType == CommandType.BATCH;
-    }
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {

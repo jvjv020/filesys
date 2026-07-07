@@ -4,9 +4,7 @@ import com.fmsy.config.DataSourceConfig;
 import com.fmsy.converter.CloseableIterator;
 import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
-import com.fmsy.enums.CommandType;
 import com.fmsy.enums.EmptyDataHandling;
-import com.fmsy.enums.TransferScenario;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.model.Command;
 import com.fmsy.model.FieldMapping;
@@ -14,8 +12,8 @@ import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.FieldMappingBuilder;
+import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
-import com.fmsy.transfer.UploadHandler;
 import com.fmsy.util.BooleanUtils;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
@@ -35,19 +33,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class SingleUploadHandler implements UploadHandler {
+public class SingleUploadHandler implements TransferHandler {
 
     private final TargetTableRepository targetTableRepository;
     private final FieldMappingBuilder fieldMappingBuilder;
     private final UploadSupport support;
     private final TransferSupport transferSupport;
     private final DataSourceConfig.DbPool dbPool;
-
-    @Override
-    public boolean supports(TransferScenario scenario, CommandType commandType) {
-        return scenario == TransferScenario.UPLOAD_SINGLE
-                && (commandType == null || commandType == CommandType.SERIAL);
-    }
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {

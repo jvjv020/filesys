@@ -2,7 +2,6 @@ package com.fmsy.transfer.download;
 
 import com.fmsy.config.DataSourceConfig;
 import com.fmsy.enums.CommandType;
-import com.fmsy.enums.TransferScenario;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.Command;
@@ -12,6 +11,7 @@ import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.BucketDistributor;
+import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.ResolvedPath;
 import lombok.RequiredArgsConstructor;
@@ -40,7 +40,7 @@ import java.util.List;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class MultiNodeDownloadHandler implements DownloadHandler {
+public class MultiNodeDownloadHandler implements TransferHandler {
 
     private final BucketDistributor bucketDistributor;
     private final DetailRepository detailRepository;
@@ -48,12 +48,6 @@ public class MultiNodeDownloadHandler implements DownloadHandler {
     private final TransferSupport transferSupport;
     private final FtpPool ftpPool;
     private final DataSourceConfig.DbPool dbPool;
-
-    @Override
-    public boolean supports(TransferScenario scenario, CommandType commandType) {
-        return scenario == TransferScenario.DOWNLOAD_MULTI_NODE
-                && commandType != CommandType.COORDINATED;
-    }
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {

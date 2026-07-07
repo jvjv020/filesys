@@ -7,6 +7,7 @@ import com.fmsy.model.Detail;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.TargetTableRepository;
+import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.BooleanUtils;
 import com.fmsy.util.ColumnNames;
 import lombok.RequiredArgsConstructor;
@@ -184,16 +185,7 @@ public class DownloadSupport {
      * P0 #1:根据桶/文件汇总结果判定主指令最终状态(SingleNode 用)。
      */
     public static String determineMainStatus(boolean allSuccess, int failedCount, int skippedCount) {
-        if (allSuccess) {
-            return ColumnNames.STATUS_SUCCESS;
-        }
-        if (failedCount > 0) {
-            return ColumnNames.STATUS_ERROR;
-        }
-        if (skippedCount > 0) {
-            return ColumnNames.STATUS_SKIPPED;
-        }
-        return ColumnNames.STATUS_ERROR;
+        return TransferSupport.determineMainStatus(allSuccess, failedCount, skippedCount);
     }
 
     /**
@@ -201,5 +193,29 @@ public class DownloadSupport {
      */
     public static String determineMainStatus(BucketSummary summary) {
         return determineMainStatus(summary.allFilesSuccess(), summary.failedCount(), summary.skippedCount());
+    }
+
+    /**
+     * 后审计失败回滚 - 删除 FTP 上已生成的目标文件。
+     * best-effort:删除失败仅记 warn,不抛异常。
+     */
+    public static boolean rollbackAfterPostAuditFailure(FtpClient client, String filePath, String reason) {
+        if (client == null || filePath == null || filePath.isEmpty()) {
+            return false;
+        }
+        try {
+            boolean deleted = client.deleteFile(filePath);
+            if (deleted) {
+                log.error("Post-audit failed ({}), rolled back FTP file: {}", reason, filePath);
+            } else {
+                log.error("Post-audit failed ({}), FTP file does not exist or delete denied: {}",
+                        reason, filePath);
+            }
+            return deleted;
+        } catch (Exception e) {
+            log.error("Failed to delete FTP file {} during post-audit rollback: {}",
+                    filePath, e.getMessage());
+            return false;
+        }
     }
 }

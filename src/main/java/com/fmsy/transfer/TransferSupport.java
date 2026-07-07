@@ -6,6 +6,7 @@ import com.fmsy.ftp.FtpClient;
 import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.Command;
 import com.fmsy.model.TransferConfig;
+import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
 import com.fmsy.transfer.placeholder.PlaceholderResolver;
 import lombok.RequiredArgsConstructor;
@@ -13,6 +14,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -57,6 +59,29 @@ public class TransferSupport {
     }
 
     /**
+     * 将两个逗号分隔字符串按位置一一对应解析为 Map。
+     * 例如: splitFieldValues("REGION,STATUS", "EAST,ACTIVE")
+     * → {"REGION" -> "EAST", "STATUS" -> "ACTIVE"}
+     */
+    public static Map<String, String> splitFieldValues(String names, String values) {
+        Map<String, String> result = new LinkedHashMap<>();
+        if (names == null || names.isEmpty() || values == null || values.isEmpty()) {
+            return result;
+        }
+        String[] nameArr = names.split(",");
+        String[] valueArr = values.split(",");
+        int len = Math.min(nameArr.length, valueArr.length);
+        for (int i = 0; i < len; i++) {
+            String n = nameArr[i].trim();
+            String v = valueArr[i].trim();
+            if (!n.isEmpty()) {
+                result.put(n, v);
+            }
+        }
+        return result;
+    }
+
+    /**
      * 构造路径占位符上下文。
      */
     public Map<String, String> buildContext(Command command, String splitFields, String fieldValue) {
@@ -66,7 +91,7 @@ public class TransferSupport {
         }
         if (splitFields != null && !splitFields.isEmpty()
                 && fieldValue != null && !fieldValue.isEmpty()) {
-            context.putAll(TransferUtils.splitFieldValues(splitFields, fieldValue));
+            context.putAll(splitFieldValues(splitFields, fieldValue));
         }
         return context;
     }
@@ -121,6 +146,16 @@ public class TransferSupport {
             }
         }
         return true;
+    }
+
+    /**
+     * 根据成功/失败/跳过计数判定主指令最终状态。
+     */
+    public static String determineMainStatus(boolean allSuccess, int failedCount, int skippedCount) {
+        if (allSuccess) return ColumnNames.STATUS_SUCCESS;
+        if (failedCount > 0) return ColumnNames.STATUS_ERROR;
+        if (skippedCount > 0) return ColumnNames.STATUS_SKIPPED;
+        return ColumnNames.STATUS_ERROR;
     }
 
     /**

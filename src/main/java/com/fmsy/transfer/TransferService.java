@@ -8,8 +8,7 @@ import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.polling.DetailPollingService;
 import com.fmsy.repository.CommandRepository;
-import com.fmsy.transfer.download.DownloadOrchestrator;
-import com.fmsy.transfer.upload.UploadOrchestrator;
+import com.fmsy.transfer.TransferOrchestrator;
 import com.fmsy.util.LogUtils;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -19,7 +18,7 @@ import org.springframework.stereotype.Service;
  * 传输服务 - 统一管理上下载执行的入口
  *
  * 功能说明：
- * - 调度 UploadOrchestrator 和 DownloadOrchestrator 执行具体任务
+ * - 调度 TransferOrchestrator 执行具体任务
  * - 管理命令执行的生命周期
  *
  * 命令类型说明：
@@ -32,8 +31,7 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 public class TransferService {
 
-    private final UploadOrchestrator uploadOrchestrator;
-    private final DownloadOrchestrator downloadOrchestrator;
+    private final TransferOrchestrator transferOrchestrator;
     private final ConfigLoaderService configLoader;
     private final DetailPollingService detailPollingService;
     private final AppConfig appConfig;
@@ -85,23 +83,17 @@ public class TransferService {
                 return;
             }
 
-            if (Result.DIRECTION_UPLOAD.equals(direction)) {
-                uploadOrchestrator.execute(command, config);
-            } else if (Result.DIRECTION_DOWNLOAD.equals(direction)) {
+            if (Result.DIRECTION_DOWNLOAD.equals(direction) && command.getCommandType() == CommandType.COORDINATED) {
                 // S型子命令由DetailPollingService处理
-                if (command.getCommandType() == CommandType.COORDINATED) {
-                    // 迭代 #17:extraInfo 格式为 "mainId|baseFilePath",需提取前半段作为主命令ID
-                    String extraInfo = command.getExtraInfo();
-                    String mainCommandId = extraInfo != null && extraInfo.contains("|")
-                            ? extraInfo.substring(0, extraInfo.indexOf('|'))
-                            : extraInfo;
-                    detailPollingService.pollAndProcess(appConfig.getNodeId(),
-                            mainCommandId, command);
-                } else {
-                    downloadOrchestrator.execute(command, config);
-                }
+                // 迭代 #17:extraInfo 格式为 "mainId|baseFilePath",需提取前半段作为主命令ID
+                String extraInfo = command.getExtraInfo();
+                String mainCommandId = extraInfo != null && extraInfo.contains("|")
+                        ? extraInfo.substring(0, extraInfo.indexOf('|'))
+                        : extraInfo;
+                detailPollingService.pollAndProcess(appConfig.getNodeId(),
+                        mainCommandId, command);
             } else {
-                log.warn("Unknown direction: {} for command: {}", direction, commandId);
+                transferOrchestrator.execute(command, config);
             }
         } catch (Exception e) {
             log.error("Failed to process command: {}", commandId, e);

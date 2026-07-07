@@ -5,7 +5,7 @@ import com.fmsy.converter.FileConverter;
 import com.fmsy.db.TableMetadataService;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.TransferConfig;
-import com.fmsy.transfer.TransferUtils;
+import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ParserConfigUtil;
 import lombok.RequiredArgsConstructor;
@@ -188,5 +188,5 @@ public class FieldMappingBuilder {
         if (namesObj == null || valuesObj == null) {
             return new LinkedHashMap<>();
         }
-        return TransferUtils.splitFieldValues(String.valueOf(namesObj), String.valueOf(valuesObj));
+        return TransferSupport.splitFieldValues(String.valueOf(namesObj), String.valueOf(valuesObj));
     }

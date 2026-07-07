@@ -1,12 +1,14 @@
 package com.fmsy.transfer.upload;
 
-import com.fmsy.enums.CommandType;
+import com.fmsy.converter.CloseableIterator;
+import com.fmsy.converter.ConverterFactory;
+import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.EmptyDataHandling;
-import com.fmsy.enums.TransferScenario;
 import com.fmsy.exception.TransferException;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.Command;
+import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.TargetTableRepository;
@@ -20,10 +22,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -35,7 +39,7 @@ import java.util.function.IntFunction;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class MultiDirectoryUploadHandler implements UploadHandler {
+public class MultiDirectoryUploadHandler implements TransferHandler {
 
     private final TargetTableRepository targetTableRepository;
     private final FieldMappingBuilder fieldMappingBuilder;
@@ -43,12 +47,6 @@ public class MultiDirectoryUploadHandler implements UploadHandler {
     private final TransferSupport transferSupport;
     private final FtpPool ftpPool;
     private final IntFunction<ExecutorService> batchExecutorFactory;
-
-    @Override
-    public boolean supports(TransferScenario scenario, CommandType commandType) {
-        return scenario == TransferScenario.UPLOAD_MULTI
-                && (commandType == null || commandType == CommandType.SERIAL);
-    }
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
@@ -94,11 +92,10 @@ public class MultiDirectoryUploadHandler implements UploadHandler {
         int skippedCount = 0;
         int failedCount = 0;
         try {
-            List<DirectoryUploadTask> tasks = new ArrayList<>();
+            List<FileTask> tasks = new ArrayList<>();
             List<Future<Integer>> futures = new ArrayList<>();
             for (String filePath : files) {
-                DirectoryUploadTask task = new DirectoryUploadTask(filePath, ftpPool, ftpName,
-                        config, command, transferSupport, support, fieldMappingBuilder);
+                FileTask task = new FileTask(filePath);
                 tasks.add(task);
                 futures.add(executor.submit(task));
             }
@@ -109,7 +106,7 @@ public class MultiDirectoryUploadHandler implements UploadHandler {
                     if (taskResult != null && taskResult > 0) {
                         totalRecords += taskResult;
                         successCount++;
-                    } else if (taskResult != null && taskResult == DirectoryUploadTask.SKIP) {
+                    } else if (taskResult != null && taskResult == FileTask.SKIP) {
                         skippedCount++;
                     } else {
                         failedCount++;
@@ -168,5 +165,62 @@ public class MultiDirectoryUploadHandler implements UploadHandler {
             return dirPath;
         }
         return dirPath.endsWith("/") ? dirPath + "*" : dirPath + "/*";
+    }
+
+    @RequiredArgsConstructor
+    private static class FileTask implements Callable<Integer> {
+        static final int SKIP = -1;
+        static final int FAIL = -2;
+
+        private final String filePath;
+
+        public String getFilePath() {
+            return filePath;
+        }
+
+        @Override
+        public Integer call() {
+            FtpClient client = ftpPool.getClient(ftpName);
+            try {
+                ResolvedPath fileInfo = ResolvedPath.of(filePath);
+                if (!transferSupport.preCheck(client, config, fileInfo)) {
+                    log.warn("Pre-check failed for file: {}", filePath);
+                    return SKIP;
+                }
+
+                FileConverter converter = ConverterFactory.get(config.getParserType());
+                int fileLineCount = support.preAudit(command.getAuditCount(), config, filePath, converter);
+                if (fileLineCount < 0) {
+                    log.warn("Pre-audit failed for file: {}", filePath);
+                    return FAIL;
+                }
+
+                try (InputStream is = client.getInputStream(filePath)) {
+                    FieldMapping mapping = fieldMappingBuilder.buildForUpload(config, null);
+
+                    try (CloseableIterator<List<Map<String, Object>>> dataIter =
+                            new CloseableIterator<>(converter.parse(is, mapping))) {
+                        int count = support.insertBatchInTx(config, dataIter, mapping);
+                        int actualFileRecords = dataIter.getRecordCount();
+
+                        if (!support.postAudit(config, actualFileRecords, count)) {
+                            if (config.getEmptyDataHandling() == EmptyDataHandling.ERROR) {
+                                throw new TransferException("POST_AUDIT_FAILED",
+                                        "Post-audit failed for file: " + filePath);
+                            }
+                            return count;
+                        }
+
+                        log.info("Uploaded file: {}", filePath);
+                        return count;
+                    }
+                }
+            } catch (Exception e) {
+                log.error("Failed to upload file: {}", filePath, e);
+                return FAIL;
+            } finally {
+                client.close();
+            }
+        }
     }
 }

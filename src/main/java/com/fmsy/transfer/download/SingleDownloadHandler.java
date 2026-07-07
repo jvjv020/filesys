@@ -2,9 +2,7 @@ package com.fmsy.transfer.download;
 
 import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
-import com.fmsy.enums.CommandType;
 import com.fmsy.enums.EmptyDataHandling;
-import com.fmsy.enums.TransferScenario;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.Command;
@@ -14,7 +12,6 @@ import com.fmsy.model.TransferConfig;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
-import com.fmsy.transfer.TransferUtils;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
 import lombok.RequiredArgsConstructor;
@@ -32,19 +29,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class SingleDownloadHandler implements DownloadHandler {
+public class SingleDownloadHandler implements TransferHandler {
 
     private final FieldMappingBuilder fieldMappingBuilder;
     private final DownloadSupport support;
     private final TransferSupport transferSupport;
     private final FtpPool ftpPool;
     private final ParallelFileGenerator parallelFileGenerator;
-
-    @Override
-    public boolean supports(TransferScenario scenario, CommandType commandType) {
-        return scenario == TransferScenario.DOWNLOAD_SINGLE
-                && (commandType == null || commandType == CommandType.SERIAL);
-    }
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
@@ -117,7 +108,7 @@ public class SingleDownloadHandler implements DownloadHandler {
             boolean postAuditOk = support.postAudit(config, fileInfo.fullPath(), dbRecordCount);
             if (!postAuditOk) {
                 transferSupport.executeWithClient(ftpName, client -> {
-                    TransferUtils.rollbackAfterPostAuditFailure(client, fileInfo.fullPath(), "single download post-audit");
+                    DownloadSupport.rollbackAfterPostAuditFailure(client, fileInfo.fullPath(), "single download post-audit");
                     return null;
                 });
                 result.setOutcome(0, ColumnNames.STATUS_ERROR,
