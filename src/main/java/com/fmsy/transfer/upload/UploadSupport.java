@@ -117,8 +117,7 @@ public class UploadSupport {
      *
      * <p>适用于:
      * <ul>
-     *   <li>{@link MultiDirectoryUploadHandler.FileTask} — 多目录并发的每个文件</li>
-     *   <li>{@link MultiBatchUploadHandler} — 明细表的每个文件</li>
+     *   <li>{@link MultiUploadHandler} — 多目录并发的每个文件/明细表逐文件</li>
      *   <li>{@link SingleUploadHandler} — 单文件(清表/增量模式)</li>
      * </ul>
      */

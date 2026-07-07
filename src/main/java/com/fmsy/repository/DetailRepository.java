@@ -19,7 +19,7 @@ import java.util.Map;
  * <p>主要调用方:
  * <ul>
  *   <li>{@code transfer/BucketDistributor} — competeBucket / countEmptyBuckets / createBuckets</li>
- *   <li>{@code transfer/upload/MultiBatchUploadHandler} — findUploadDetails</li>
+ *   <li>{@code transfer/upload/MultiUploadHandler} — findUploadDetails</li>
  *   <li>{@code transfer/download/MultiNodeDownloadHandler} — updateAuditCount</li>
  *   <li>{@code polling/DetailPollingService} — findBucketData(动态表名,见 TargetTableRepository)</li>
  * </ul>
@@ -104,7 +104,7 @@ public class DetailRepository {
         return getJdbc().query(SQL_FIND_BUCKETS, DETAIL_MAPPER, commandId, status, limit);
     }
 
-    /** 上传场景:按命令 ID 与指定状态查明细(由 MultiBatchUploadHandler 调用) */
+    /** 上传场景:按命令 ID 与指定状态查明细(由 MultiUploadHandler 调用) */
     public List<Map<String, Object>> findUploadDetails(Long commandId, String status) {
         return getJdbc().queryForList(SQL_FIND_UPLOAD_DETAILS, commandId, status);
     }
