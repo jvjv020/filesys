@@ -1,10 +1,8 @@
 package com.fmsy.transfer.download;
 
 import com.fmsy.converter.ConverterFactory;
-import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.EmptyDataHandling;
 import com.fmsy.model.Command;
-import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.transfer.FieldMappingBuilder;
@@ -66,19 +64,17 @@ public class SingleDownloadHandler implements TransferHandler {
             dbRecordCount = support.countRecords(config);
         }
 
-        FileConverter converter = ConverterFactory.get(config.getParserType());
-        FieldMapping mapping = fieldMappingBuilder.buildForDownload(config);
-
-        EmptyDataHandling emptyHandling = config.getEmptyDataHandling();
-        if (dbRecordCount == 0 && !transferSupport.handleEmptyData(dbRecordCount, emptyHandling)) {
+        if (dbRecordCount == 0 && !transferSupport.handleEmptyData(dbRecordCount, config.getEmptyDataHandling())) {
             result.setOutcome(0,
-                    emptyHandling == EmptyDataHandling.SKIP ? ColumnNames.STATUS_SKIPPED : ColumnNames.STATUS_ERROR,
-                    "Empty data, " + emptyHandling);
+                    config.getEmptyDataHandling() == EmptyDataHandling.SKIP ? ColumnNames.STATUS_SKIPPED : ColumnNames.STATUS_ERROR,
+                    "Empty data, " + config.getEmptyDataHandling());
             return;
         }
 
         // Phase 3: FTP data transfer + postProcess
         int recordCount = transferSupport.executeWithClient(ftpName, client -> {
+            var converter = ConverterFactory.get(config.getParserType());
+            var mapping = fieldMappingBuilder.buildForDownload(config);
             int count;
             try (OutputStream os = client.getOutputStream(fileInfo.fullPath())) {
                 count = parallelFileGenerator.generate(os, config, converter, mapping, dbRecordCount);
