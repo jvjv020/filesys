@@ -3,8 +3,6 @@ package com.fmsy.transfer.download;
 import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.EmptyDataHandling;
-import com.fmsy.ftp.FtpClient;
-import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.Command;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
@@ -21,7 +19,6 @@ import org.springframework.stereotype.Component;
 import java.io.OutputStream;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * DOWNLOAD_SINGLE 场景:整表 → 单个 FTP 文件。
@@ -34,7 +31,6 @@ public class SingleDownloadHandler implements TransferHandler {
     private final FieldMappingBuilder fieldMappingBuilder;
     private final DownloadSupport support;
     private final TransferSupport transferSupport;
-    private final FtpPool ftpPool;
     private final ParallelFileGenerator parallelFileGenerator;
 
     @Override
@@ -44,21 +40,18 @@ public class SingleDownloadHandler implements TransferHandler {
         ResolvedPath fileInfo = transferSupport.resolveFilePath(config.getFilePath(), command);
 
         // Phase 1: Fast FTP checks only (preCheck + overwrite check)
-        {
-            FtpClient client = ftpPool.getClient(ftpName);
-            try {
-                if (!transferSupport.preCheck(client, config, fileInfo)) {
-                    result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-check failed");
-                    return;
-                }
-                if (!support.checkOverwriteAllowed(client, fileInfo.fullPath(), config.getOverwriteFlag())) {
-                    result.setOutcome(0, ColumnNames.STATUS_ERROR, "Overwrite denied: completion flag exists");
-                    return;
-                }
-            } finally {
-                client.close();
+        boolean checksPassed = transferSupport.executeWithClient(ftpName, client -> {
+            if (!transferSupport.preCheck(client, config, fileInfo)) {
+                result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-check failed");
+                return false;
             }
-        }
+            if (!support.checkOverwriteAllowed(client, fileInfo.fullPath(), config.getOverwriteFlag())) {
+                result.setOutcome(0, ColumnNames.STATUS_ERROR, "Overwrite denied: completion flag exists");
+                return false;
+            }
+            return true;
+        });
+        if (!checksPassed) return;
 
         // Phase 2: DB-only work (no FTP client held)
         int dbRecordCount = -1;
@@ -77,33 +70,27 @@ public class SingleDownloadHandler implements TransferHandler {
         FieldMapping mapping = fieldMappingBuilder.buildForDownload(config);
 
         EmptyDataHandling emptyHandling = config.getEmptyDataHandling();
-        if (dbRecordCount == 0) {
-            if (emptyHandling == EmptyDataHandling.SKIP) {
-                result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Empty data, SKIP");
-                return;
-            }
-            if (emptyHandling == EmptyDataHandling.ERROR) {
-                result.setOutcome(0, ColumnNames.STATUS_ERROR, "Empty data, ERROR");
-                return;
-            }
+        if (dbRecordCount == 0 && !transferSupport.handleEmptyData(dbRecordCount, emptyHandling)) {
+            result.setOutcome(0,
+                    emptyHandling == EmptyDataHandling.SKIP ? ColumnNames.STATUS_SKIPPED : ColumnNames.STATUS_ERROR,
+                    "Empty data, " + emptyHandling);
+            return;
         }
 
-        // Phase 3: FTP data transfer + postProcess (borrow again)
-        AtomicInteger actualCount = new AtomicInteger(dbRecordCount);
-        ftpPool.withClient(ftpName, client -> {
+        // Phase 3: FTP data transfer + postProcess
+        int recordCount = transferSupport.executeWithClient(ftpName, client -> {
+            int count;
             try (OutputStream os = client.getOutputStream(fileInfo.fullPath())) {
-                int count = parallelFileGenerator.generate(os, config, converter, mapping, dbRecordCount);
-                actualCount.set(count);
+                count = parallelFileGenerator.generate(os, config, converter, mapping, dbRecordCount);
                 client.completePendingCommand();
             }
             Map<String, String> extra = new HashMap<>();
-            extra.put("C", String.valueOf(actualCount.get()));
+            extra.put("C", String.valueOf(count));
             transferSupport.postProcess(client, config, fileInfo, extra);
+            return count;
         });
-        int recordCount = actualCount.get();
 
         // postAudit (uses its own FTP client internally via AuditService)
-        // 复用 dbRecordCount 避免后审计再 COUNT
         if (command.getAuditCount() != null && command.getAuditCount() >= 0) {
             boolean postAuditOk = support.postAudit(config, fileInfo.fullPath(), dbRecordCount);
             if (!postAuditOk) {
