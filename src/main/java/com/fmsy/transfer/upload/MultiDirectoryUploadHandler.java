@@ -53,24 +53,14 @@ public class MultiDirectoryUploadHandler implements TransferHandler {
 
         ResolvedPath dirInfo = transferSupport.resolveFilePath(config.getFilePath(), command);
         String listPattern = toGlobPattern(dirInfo != null ? dirInfo.fullPath() : null);
-        String[] files;
 
-        // Phase 1: preCheck + listFiles (short-lived FTP client)
-        {
-            FtpClient client = ftpPool.getClient(ftpName);
-            try {
-                if (!transferSupport.preCheck(client, config, dirInfo)) {
-                    result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-check failed");
-                    return;
-                }
-                log.debug("Multi-directory list pattern: {}", listPattern);
-                files = client.listFiles(listPattern);
-            } finally {
-                client.close();
-            }
+        // Phase 1: preCheck + listFiles
+        String[] files = listFiles(ftpName, config, dirInfo, listPattern);
+        if (files == null) {
+            result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-check failed");
+            return;
         }
-
-        if (files == null || files.length == 0) {
+        if (files.length == 0) {
             log.info("No files found in directory: {} (pattern: {})", dirInfo, listPattern);
             result.setOutcome(0, UploadSupport.determineMainStatus(UploadSupport.UploadResult.allSkipped()), "");
             return;
@@ -145,14 +135,31 @@ public class MultiDirectoryUploadHandler implements TransferHandler {
                     "Post-audit failed for " + failedCount + " file(s)");
         }
 
-        // Phase 3: postProcess (short-lived FTP client)
+        // Phase 3: postProcess
         Map<String, String> extra = new HashMap<>();
         extra.put("C", String.valueOf(totalRecords));
-        ftpPool.withClient(ftpName, client ->
-                transferSupport.postProcess(client, config, dirInfo, extra));
+        transferSupport.executeWithClient(ftpName, client -> {
+            transferSupport.postProcess(client, config, dirInfo, extra);
+            return null;
+        });
 
         UploadSupport.UploadResult ur = new UploadSupport.UploadResult(totalRecords, successCount, skippedCount, failedCount);
         result.setOutcome(ur.records(), UploadSupport.determineMainStatus(ur), "");
+    }
+
+    /**
+     * 列出匹配的文件（短生命周期 FTP 连接）。
+     * @return 文件列表数组，preCheck 失败时返回 null
+     */
+    private String[] listFiles(String ftpName, TransferConfig config,
+                               ResolvedPath dirInfo, String listPattern) throws Exception {
+        return transferSupport.executeWithClient(ftpName, client -> {
+            if (!transferSupport.preCheck(client, config, dirInfo)) {
+                return null;
+            }
+            log.debug("Multi-directory list pattern: {}", listPattern);
+            return client.listFiles(listPattern);
+        });
     }
 
     /**
