@@ -22,7 +22,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -186,21 +185,10 @@ public class SingleNodeDownloadHandler implements TransferHandler {
                 baseFileInfo.fullPath(), context);
 
         // Phase 1: DB-only checks (no FTP client held)
-        // 优先从 preAudit 获取计数，避免二次 countByBucket
-        int recordCount = -1;
-        if (command.getCommandType() == CommandType.BATCH) {
-            Integer detailAuditCount = bucket.getAuditCount();
-            if (detailAuditCount != null && detailAuditCount >= 0) {
-                recordCount = support.preAuditByBucket(config, detailAuditCount, fieldValue);
-                if (recordCount < 0) {
-                    markBucketFailed(result, bucket, nodeId);
-                    return;
-                }
-            }
-        }
+        int recordCount = resolveBucketRecordCount(command, config, bucket, fieldValue);
         if (recordCount < 0) {
-            recordCount = targetTableRepository.countByBucket(
-                    config.getDbName(), config.getTableName(), config.getSplitFields(), fieldValue);
+            markBucketFailed(result, bucket, nodeId);
+            return;
         }
 
         if (!transferSupport.handleEmptyData(recordCount, config.getEmptyDataHandling())) {
@@ -220,10 +208,6 @@ public class SingleNodeDownloadHandler implements TransferHandler {
                  OutputStream os = client.getOutputStream(targetFileInfo.fullPath())) {
                 converter.generate(os, data, mapping);
                 client.completePendingCommand();
-            } catch (IOException e) {
-                log.error("Failed to generate file for bucket {}: {}", fieldValue, e.getMessage(), e);
-                markBucketFailed(result, bucket, nodeId);
-                return;
             }
             generatedFiles.add(targetFileInfo.fullPath());
 
@@ -242,6 +226,21 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         } finally {
             client.close();
         }
+    }
+
+    /**
+     * 解析桶的记录数:优先从 preAudit 获取，避免二次 countByBucket。
+     * @return 记录数（≥0），-1 表示审计失败
+     */
+    private int resolveBucketRecordCount(Command command, TransferConfig config, Detail bucket, String fieldValue) {
+        if (command.getCommandType() == CommandType.BATCH) {
+            Integer detailAuditCount = bucket.getAuditCount();
+            if (detailAuditCount != null && detailAuditCount >= 0) {
+                return support.preAuditByBucket(config, detailAuditCount, fieldValue);
+            }
+        }
+        return targetTableRepository.countByBucket(
+                config.getDbName(), config.getTableName(), config.getSplitFields(), fieldValue);
     }
 
     private void markBucketFailed(BucketResult result, Detail bucket, String nodeId) {
