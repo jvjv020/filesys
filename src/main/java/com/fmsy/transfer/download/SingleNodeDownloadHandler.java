@@ -193,10 +193,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
             if (detailAuditCount != null && detailAuditCount >= 0) {
                 recordCount = support.preAuditByBucket(config, detailAuditCount, fieldValue);
                 if (recordCount < 0) {
-                    log.error("Pre-audit failed for bucket value: {}", fieldValue);
-                    result.allSuccess = false;
-                    result.failedCount++;
-                    support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_ERROR, nodeId);
+                    markBucketFailed(result, bucket, nodeId);
                     return;
                 }
             }
@@ -206,17 +203,10 @@ public class SingleNodeDownloadHandler implements TransferHandler {
                     config.getDbName(), config.getTableName(), config.getSplitFields(), fieldValue);
         }
 
-        EmptyDataHandling emptyHandling = config.getEmptyDataHandling();
-        if (!transferSupport.handleEmptyData(recordCount, emptyHandling)) {
-            if (emptyHandling == EmptyDataHandling.ERROR) {
-                result.allSuccess = false;
-                result.failedCount++;
-                support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_ERROR, nodeId);
-            } else { // SKIP
-                result.allSuccess = false;
-                result.skippedCount++;
-                support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_SKIPPED, nodeId);
-            }
+        if (!transferSupport.handleEmptyData(recordCount, config.getEmptyDataHandling())) {
+            boolean isError = config.getEmptyDataHandling() == EmptyDataHandling.ERROR;
+            markBucketFailed(result, bucket, nodeId, isError);
+            if (!isError) result.skippedCount++;
             return;
         }
 
@@ -232,9 +222,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
                 client.completePendingCommand();
             } catch (IOException e) {
                 log.error("Failed to generate file for bucket {}: {}", fieldValue, e.getMessage(), e);
-                result.allSuccess = false;
-                result.failedCount++;
-                support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_ERROR, nodeId);
+                markBucketFailed(result, bucket, nodeId);
                 return;
             }
             generatedFiles.add(targetFileInfo.fullPath());
@@ -250,11 +238,19 @@ public class SingleNodeDownloadHandler implements TransferHandler {
             result.totalRecordCount += recordCount;
         } catch (Exception e) {
             log.error("Bucket processing crashed: {}", fieldValue, e);
-            result.allSuccess = false;
-            result.failedCount++;
-            support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_ERROR, nodeId);
+            markBucketFailed(result, bucket, nodeId);
         } finally {
             client.close();
         }
+    }
+
+    private void markBucketFailed(BucketResult result, Detail bucket, String nodeId) {
+        markBucketFailed(result, bucket, nodeId, true);
+    }
+
+    private void markBucketFailed(BucketResult result, Detail bucket, String nodeId, boolean isError) {
+        result.allSuccess = false;
+        if (isError) result.failedCount++;
+        support.updateDetailStatusForBucket(bucket, isError ? ColumnNames.STATUS_ERROR : ColumnNames.STATUS_SKIPPED, nodeId);
     }
 }
