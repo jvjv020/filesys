@@ -1,5 +1,7 @@
 package com.fmsy.transfer;
 
+import com.fmsy.config.DataSourceConfig;
+import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
@@ -41,6 +43,7 @@ public class BucketDistributor {
     private final DetailRepository detailRepository;
     private final CommandRepository commandRepository;
     private final TargetTableRepository targetTableRepository;
+    private final DataSourceConfig.DbPool dbPool;
 
     /**
      * 查询待处理的桶列表
@@ -142,5 +145,64 @@ public class BucketDistributor {
         log.info("Created {} S-type child command(s) for main command {} (bucket count: {})",
                 created, mainCommandId, count);
         return created;
+    }
+
+    /**
+     * BATCH 模式:逐桶预统计 auditCount 后创建 S 型子命令。
+     * <p>整段包在事务中:任一桶的 audit_count 写入或任一子命令创建失败 → 全部回滚,
+     * 避免"已有桶审计数已更新但子命令半创建"的中间态。
+     *
+     * @param command      主命令
+     * @param config       传输配置
+     * @param baseFilePath 基础文件路径
+     * @param splitFields  拆分字段名
+     * @return 创建的子命令数量(0 表示无桶或无数据)
+     */
+    public int prepareBatchChildren(Command command, TransferConfig config,
+                                    String baseFilePath, String splitFields) {
+        List<Detail> existingBuckets = detailRepository.findByCommandId(command.getId());
+        if (existingBuckets.isEmpty()) {
+            log.info("No existing buckets found for BATCH command: {}", command.getId());
+            return 0;
+        }
+
+        return dbPool.getTransactionTemplate(config.getDbName()).execute(status -> {
+            for (Detail bucket : existingBuckets) {
+                int recordCount = targetTableRepository.countByBucket(
+                        config.getDbName(), config.getTableName(), splitFields, bucket.getFieldValue());
+                detailRepository.updateAuditCount(bucket.getId(), recordCount);
+                log.debug("Updated bucket {} with audit count {}", bucket.getId(), recordCount);
+            }
+
+            return createChildCommands(command.getId(),
+                    config.getCategoryCode(), config.getControlCode(), baseFilePath);
+        });
+    }
+
+    /**
+     * SERIAL 模式:从目标表拉 distinct 分桶值 → 写桶 → 创建 S 型子命令。
+     * <p>createBuckets + createChildCommands 包在事务中:避免"桶已写但子命令未创建"
+     * 的孤儿状态(孤儿桶永久无主,只能人工清理)。
+     *
+     * @param command      主命令
+     * @param config       传输配置
+     * @param baseFilePath 基础文件路径
+     * @param splitFields  拆分字段名
+     * @return 创建的子命令数量(0 表示无数据)
+     */
+    public int prepareSerialChildren(Command command, TransferConfig config,
+                                     String baseFilePath, String splitFields) {
+        List<String> bucketValues = distinctBuckets(config);
+        if (bucketValues.isEmpty()) {
+            log.info("No data found for command: {}", command.getId());
+            return 0;
+        }
+
+        return dbPool.getTransactionTemplate(config.getDbName()).execute(status -> {
+            createBuckets(command.getId(), bucketValues, splitFields,
+                    config.getCategoryCode(), config.getControlCode());
+            return createChildCommands(command.getId(),
+                    config.getCategoryCode(), config.getControlCode(), baseFilePath);
+        });
     }
 }
