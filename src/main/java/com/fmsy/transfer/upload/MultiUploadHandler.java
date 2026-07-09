@@ -100,7 +100,7 @@ public class MultiUploadHandler implements TransferHandler {
         try {
             List<Future<Integer>> futures = new ArrayList<>();
             for (String filePath : files) {
-                futures.add(executor.submit(new FileTask(filePath)));
+                futures.add(executor.submit(new FileTask(filePath, ftpName, command, config)));
             }
 
             for (int i = 0; i < futures.size(); i++) {
@@ -163,58 +163,65 @@ public class MultiUploadHandler implements TransferHandler {
     private void handleBatch(Command command, TransferConfig config, Result result) throws Exception {
         log.info("Multi-file upload with details");
         String nodeId = config.getNodeId();
+        String ftpName = config.getFtpName();
 
-        transferSupport.executeWithClient(config.getFtpName(), client -> {
-            if (!transferSupport.preCheck(client, config, null)) {
-                result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-check failed");
-                return null;
+        // Phase 1 (FTP): preCheck → 释放连接
+        boolean preCheckOk = transferSupport.executeWithClient(ftpName, client ->
+                transferSupport.preCheck(client, config, null));
+        if (!preCheckOk) {
+            result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-check failed");
+            return;
+        }
+
+        // Phase 2 (DB + per-file FTP): 查询明细表,逐文件处理
+        // 每个文件内部独立借还 FTP 连接,DB 操作不持有 FTP 连接
+        List<Map<String, Object>> details = detailRepository.findUploadDetails(
+                command.getId(), ColumnNames.STATUS_EMPTY);
+
+        if (details.isEmpty()) {
+            log.info("No details found for command: {}", command.getId());
+            result.setOutcome(0, UploadSupport.determineMainStatus(UploadSupport.UploadResult.allSkipped()), "");
+            return;
+        }
+
+        boolean truncateFirst = BooleanUtils.isYes(config.getClearTableFlag());
+
+        int totalRecords = 0;
+        int successCount = 0;
+        int skippedCount = 0;
+        int failedCount = 0;
+        ResolvedPath lastFileInfo = null;
+        for (Map<String, Object> detail : details) {
+            UploadSupport.UploadResult perFile = processOneDetail(
+                    command, config, detail, nodeId, truncateFirst);
+            truncateFirst = false; // 仅第一个文件执行 truncate
+            totalRecords += perFile.records();
+            successCount += perFile.successCount();
+            skippedCount += perFile.skippedCount();
+            failedCount += perFile.failedCount();
+
+            String fileName = (String) detail.get(ColumnNames.FILE_NAME);
+            if (fileName != null && !fileName.isEmpty() && perFile.successCount() > 0) {
+                lastFileInfo = resolveDetailFilePath(command, config, detail, fileName);
             }
+        }
 
-            List<Map<String, Object>> details = detailRepository.findUploadDetails(
-                    command.getId(), ColumnNames.STATUS_EMPTY);
-
-            if (details.isEmpty()) {
-                log.info("No details found for command: {}", command.getId());
-                result.setOutcome(0, UploadSupport.determineMainStatus(UploadSupport.UploadResult.allSkipped()), "");
-                return null;
-            }
-
-            if (BooleanUtils.isYes(config.getClearTableFlag())) {
-                support.truncateTable(config);
-            }
-
-            int totalRecords = 0;
-            int successCount = 0;
-            int skippedCount = 0;
-            int failedCount = 0;
-            ResolvedPath lastFileInfo = null;
-            for (Map<String, Object> detail : details) {
-                UploadSupport.UploadResult perFile = processOneDetail(command, config, client, detail, nodeId);
-                totalRecords += perFile.records();
-                successCount += perFile.successCount();
-                skippedCount += perFile.skippedCount();
-                failedCount += perFile.failedCount();
-
-                String fileName = (String) detail.get(ColumnNames.FILE_NAME);
-                if (fileName != null && !fileName.isEmpty() && perFile.successCount() > 0) {
-                    lastFileInfo = resolveDetailFilePath(command, config, detail, fileName);
-                }
-            }
-
-            Map<String, String> extra = new HashMap<>();
-            extra.put("C", String.valueOf(totalRecords));
+        // Phase 3 (FTP): postProcess
+        Map<String, String> extra = new HashMap<>();
+        extra.put("C", String.valueOf(totalRecords));
+        transferSupport.executeWithClient(ftpName, client -> {
             transferSupport.postProcess(client, config, lastFileInfo, extra);
-
-            result.setOutcome(totalRecords,
-                    UploadSupport.determineMainStatus(new UploadSupport.UploadResult(
-                            totalRecords, successCount, skippedCount, failedCount)), "");
             return null;
         });
+
+        result.setOutcome(totalRecords,
+                UploadSupport.determineMainStatus(new UploadSupport.UploadResult(
+                        totalRecords, successCount, skippedCount, failedCount)), "");
     }
 
     private UploadSupport.UploadResult processOneDetail(Command command, TransferConfig config,
-                                                        FtpClient client, Map<String, Object> detail,
-                                                        String nodeId) {
+                                                        Map<String, Object> detail,
+                                                        String nodeId, boolean truncateFirst) {
         Long detailId = ((Number) detail.get(ColumnNames.DETAIL_ID)).longValue();
         String fileName = (String) detail.get(ColumnNames.FILE_NAME);
 
@@ -234,28 +241,29 @@ public class MultiUploadHandler implements TransferHandler {
             return new UploadSupport.UploadResult(0, 0, 0, 1);
         }
 
-        try (InputStream is = client.getInputStream(fileInfo.fullPath())) {
-            FieldMapping mapping = fieldMappingBuilder.buildForUpload(config, detail);
+        return transferSupport.executeWithClient(config.getFtpName(), client -> {
+            try (InputStream is = client.getInputStream(fileInfo.fullPath())) {
+                FieldMapping mapping = fieldMappingBuilder.buildForUpload(config, detail);
 
-            try (CloseableIterator<List<Map<String, Object>>> dataIter =
-                    new CloseableIterator<>(converter.parse(is, mapping))) {
-                int count = support.insertBatchInTx(config, dataIter, mapping);
-                int actualFileRecords = dataIter.getRecordCount();
-                boolean postAuditOk = support.postAudit(config, actualFileRecords, count);
-                if (postAuditOk) {
-                    detailRepository.updateStatus(detailId, ColumnNames.STATUS_SUCCESS, nodeId);
-                    log.info("Uploaded file from detail: {}", fileInfo.fullPath());
-                    return new UploadSupport.UploadResult(count, 1, 0, 0);
-                } else {
-                    detailRepository.updateStatus(detailId, ColumnNames.STATUS_ERROR, nodeId);
-                    return new UploadSupport.UploadResult(0, 0, 0, 1);
+                try (CloseableIterator<List<Map<String, Object>>> dataIter =
+                        new CloseableIterator<>(converter.parse(is, mapping))) {
+                    int count = support.insertBatchInTx(config, dataIter, mapping, truncateFirst);
+                    int actualFileRecords = dataIter.getRecordCount();
+                    boolean postAuditOk = support.postAudit(config, actualFileRecords, count);
+                    if (postAuditOk) {
+                        detailRepository.updateStatus(detailId, ColumnNames.STATUS_SUCCESS, nodeId);
+                        return new UploadSupport.UploadResult(count, 1, 0, 0);
+                    } else {
+                        detailRepository.updateStatus(detailId, ColumnNames.STATUS_ERROR, nodeId);
+                        return new UploadSupport.UploadResult(0, 0, 0, 1);
+                    }
                 }
+            } catch (Exception e) {
+                log.error("Failed to upload file from detail: {}", fileInfo.fullPath(), e);
+                detailRepository.updateStatus(detailId, ColumnNames.STATUS_ERROR, nodeId);
+                return new UploadSupport.UploadResult(0, 0, 0, 1);
             }
-        } catch (Exception e) {
-            log.error("Failed to upload file from detail: {}", fileInfo.fullPath(), e);
-            detailRepository.updateStatus(detailId, ColumnNames.STATUS_ERROR, nodeId);
-            return new UploadSupport.UploadResult(0, 0, 0, 1);
-        }
+        });
     }
 
     private ResolvedPath resolveDetailFilePath(Command command, TransferConfig config,
@@ -283,9 +291,9 @@ public class MultiUploadHandler implements TransferHandler {
         }
     }
 
-    private static void rollbackOnFailure(TransferConfig config, int failedCount) throws TransferException {
+    private void rollbackOnFailure(TransferConfig config, int failedCount) throws TransferException {
         if (BooleanUtils.isYes(config.getClearTableFlag())) {
-            // 清表模式需要手动 truncate 回滚（无事务保护）
+            support.truncateTable(config);
             log.error("Rolled back table {} due to {} failed file(s) post-audit",
                     config.getTableName(), failedCount);
         } else {
@@ -296,12 +304,21 @@ public class MultiUploadHandler implements TransferHandler {
                 "Post-audit failed for " + failedCount + " file(s)");
     }
 
-    @RequiredArgsConstructor
-    private static class FileTask implements Callable<Integer> {
+    private class FileTask implements Callable<Integer> {
         static final int SKIP = -1;
         static final int FAIL = -2;
 
         private final String filePath;
+        private final String ftpName;
+        private final Command command;
+        private final TransferConfig config;
+
+        FileTask(String filePath, String ftpName, Command command, TransferConfig config) {
+            this.filePath = filePath;
+            this.ftpName = ftpName;
+            this.command = command;
+            this.config = config;
+        }
 
         @Override
         public Integer call() {
@@ -333,6 +350,10 @@ public class MultiUploadHandler implements TransferHandler {
                                 throw new TransferException("POST_AUDIT_FAILED",
                                         "Post-audit failed for file: " + filePath);
                             }
+                            // 非 ERROR 模式：数据已插入但审计不通过。返回 count 让 totalRecords 计入，
+                            // 但主线程识别为失败（status=ERROR）。与 SingleUploadHandler 行为一致。
+                            log.warn("Post-audit failed for file: {} (records={}), data kept in table",
+                                    filePath, count);
                             return count;
                         }
 

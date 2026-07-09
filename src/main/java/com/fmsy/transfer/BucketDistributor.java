@@ -86,7 +86,11 @@ public class BucketDistributor {
      */
     public List<String> distinctBuckets(TransferConfig config) {
         String splitFields = config.getSplitFields();
-        String[] fieldNames = splitFields.split(",");
+        String[] rawNames = splitFields.split(",");
+        String[] fieldNames = new String[rawNames.length];
+        for (int i = 0; i < rawNames.length; i++) {
+            fieldNames[i] = rawNames[i].trim();
+        }
         List<Map<String, Object>> distinctValues = targetTableRepository.querySmallResult(
                 config.getDbName(), config.getTableName(),
                 Arrays.asList(fieldNames), true,
@@ -96,7 +100,7 @@ public class BucketDistributor {
             StringBuilder fv = new StringBuilder();
             boolean allPresent = true;
             for (int i = 0; i < fieldNames.length; i++) {
-                Object v = row.get(fieldNames[i].trim());
+                Object v = row.get(fieldNames[i]);
                 if (v == null) {
                     allPresent = false;
                     break;
@@ -130,21 +134,16 @@ public class BucketDistributor {
             return 0;
         }
 
-        // 迭代 #17:把 baseFilePath 嵌入 EXTRA_INFO,格式 "mainId|baseFilePath"
-        String pathForExtraInfo = baseFilePath == null ? "" : baseFilePath;
-        String extraInfo = mainCommandId.toString() + "|" + pathForExtraInfo;
+        String extraInfo = mainCommandId.toString() + "|"
+                + (baseFilePath != null ? baseFilePath : "");
 
-        int created = 0;
-        // 迭代 #17:把 baseFilePath 嵌入 EXTRA_INFO,格式 "mainId|baseFilePath"
-        // 改为批量 INSERT,减少 N 次 SQL 网络往返为 1 次。
         if (count > 0) {
             commandRepository.batchCreateChildCommands(count, categoryCode, controlCode, extraInfo, -1);
-            created = count;
         }
 
         log.info("Created {} S-type child command(s) for main command {} (bucket count: {})",
-                created, mainCommandId, count);
-        return created;
+                count, mainCommandId, count);
+        return count;
     }
 
     /**

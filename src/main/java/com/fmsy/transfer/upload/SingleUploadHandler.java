@@ -37,38 +37,63 @@ public class SingleUploadHandler implements TransferHandler {
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
+        String ftpName = config.getFtpName();
         ResolvedPath fileInfo = transferSupport.resolveFilePath(config.getFilePath(), command);
 
-        transferSupport.executeWithClient(config.getFtpName(), client -> {
-            if (!transferSupport.preCheck(client, config, fileInfo)) {
-                result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-check failed");
-                return null;
-            }
+        // Phase 1 (FTP): preCheck → 释放连接
+        boolean preCheckOk = transferSupport.executeWithClient(ftpName, client ->
+                transferSupport.preCheck(client, config, fileInfo));
+        if (!preCheckOk) {
+            result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-check failed");
+            return;
+        }
 
-            FileConverter converter = ConverterFactory.get(config.getParserType());
-            int fileLineCount = support.preAudit(command.getAuditCount(), config, fileInfo.fullPath(), converter);
-            if (fileLineCount < 0) {
-                result.setOutcome(0, ColumnNames.STATUS_ERROR, "Pre-audit failed");
+        // Phase 2 (DB + FTP): preAudit(内部借还FTP) → 读文件解析 → 插入
+        FileConverter converter = ConverterFactory.get(config.getParserType());
+        int fileLineCount = support.preAudit(command.getAuditCount(), config, fileInfo.fullPath(), converter);
+        if (fileLineCount < 0) {
+            result.setOutcome(0, ColumnNames.STATUS_ERROR, "Pre-audit failed");
+            transferSupport.executeWithClient(ftpName, client -> {
                 moveToErrorDir(client, fileInfo.fullPath());
                 return null;
-            }
+            });
+            return;
+        }
 
-            int recordCount;
+        // Phase 2: read & insert (internal FTP borrow/return per file)
+        // Returns record count on success, or -1 on post-audit failure (non-ERROR mode)
+        int recordCount = readAndInsert(ftpName, fileInfo, config, converter, result);
+
+        // Phase 3 (FTP): postProcess — only when phase 2 succeeded without errors
+        if (recordCount >= 0) {
+            Map<String, String> extra = new HashMap<>();
+            extra.put("C", String.valueOf(recordCount));
+            transferSupport.executeWithClient(ftpName, client -> {
+                transferSupport.postProcess(client, config, fileInfo, extra);
+                return null;
+            });
+            result.setOutcome(recordCount, ColumnNames.STATUS_SUCCESS, "");
+        }
+    }
+
+    /**
+     * 读文件 → 插入 → 后审计。返回成功插入的记录数，-1 表示后审计失败(非ERROR模式)。
+     * ERROR 模式的后审计失败直接抛异常。
+     */
+    private int readAndInsert(String ftpName, ResolvedPath fileInfo, TransferConfig config,
+                               FileConverter converter, Result result) throws Exception {
+        return transferSupport.executeWithClient(ftpName, client -> {
             try (InputStream is = client.getInputStream(fileInfo.fullPath())) {
                 FieldMapping mapping = fieldMappingBuilder.buildForUpload(config, null);
 
                 try (CloseableIterator<List<Map<String, Object>>> dataIter =
                         new CloseableIterator<>(converter.parse(is, mapping))) {
 
-                    if (BooleanUtils.isYes(config.getClearTableFlag())) {
-                        support.truncateTable(config);
-                    }
+                    boolean truncateFirst = BooleanUtils.isYes(config.getClearTableFlag());
+                    int count = support.insertBatchInTx(config, dataIter, mapping, truncateFirst);
 
-                    recordCount = support.insertBatchInTx(config, dataIter, mapping);
-
-                    // postAudit: 用 dataIter 统计的实际行数，而非 preAudit 的行数
                     int actualFileRecords = dataIter.getRecordCount();
-                    if (!support.postAudit(config, actualFileRecords, recordCount)) {
+                    if (!support.postAudit(config, actualFileRecords, count)) {
                         if (config.getEmptyDataHandling() == EmptyDataHandling.ERROR) {
                             if (BooleanUtils.isYes(config.getClearTableFlag())) {
                                 support.truncateTable(config);
@@ -78,15 +103,13 @@ public class SingleUploadHandler implements TransferHandler {
                             throw new RuntimeException(
                                     "Post-audit failed: record count mismatch for " + fileInfo.fullPath());
                         }
+                        result.setOutcome(0, ColumnNames.STATUS_ERROR,
+                                "Post-audit failed: record count mismatch for " + fileInfo.fullPath());
+                        return -1;
                     }
+                    return count;
                 }
             }
-
-            Map<String, String> extra = new HashMap<>();
-            extra.put("C", String.valueOf(recordCount));
-            transferSupport.postProcess(client, config, fileInfo, extra);
-            result.setOutcome(recordCount, ColumnNames.STATUS_SUCCESS, "");
-            return null;
         });
     }
 

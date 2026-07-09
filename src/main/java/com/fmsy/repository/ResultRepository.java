@@ -74,13 +74,21 @@ public class ResultRepository {
 
     /**
      * 简化结果写入 — 异常/跳过场景使用,仅写 6 列(指令ID/类别/控制/处理结果/说明/日期)。
-     * 走默认 DB。
+     * 走指定数据源,dbName 为空时回退到 DEFAULT_DB。
      */
     public void insertSimple(Long commandId, String categoryCode, String controlCode,
-                             String result, String description) {
-        JdbcTemplateWrapper jdbc = getJdbc(ColumnNames.DEFAULT_DB);
+                             String result, String description, String dbName) {
+        JdbcTemplateWrapper jdbc = getJdbc(dbName != null ? dbName : ColumnNames.DEFAULT_DB);
         jdbc.update(SQL_INSERT_SIMPLE, commandId, categoryCode, controlCode, result,
                 description, LocalDate.now());
         log.info("Wrote simple result for command: {}", commandId);
+    }
+
+    /**
+     * 简化结果写入 — 走默认 DB。保留重载避免修改其他调用方。
+     */
+    public void insertSimple(Long commandId, String categoryCode, String controlCode,
+                             String result, String description) {
+        insertSimple(commandId, categoryCode, controlCode, result, description, ColumnNames.DEFAULT_DB);
     }
 }

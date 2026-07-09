@@ -8,7 +8,6 @@ import com.fmsy.model.FieldMapping;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.TransferSupport;
-import com.fmsy.util.ColumnNames;
 import com.fmsy.util.SystemConstants;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -123,12 +122,20 @@ public class UploadSupport {
      */
     public int insertBatchInTx(TransferConfig config, Iterator<List<Map<String, Object>>> dataIter,
                                FieldMapping mapping) {
+        return insertBatchInTx(config, dataIter, mapping, false);
+    }
+
+    public int insertBatchInTx(TransferConfig config, Iterator<List<Map<String, Object>>> dataIter,
+                               FieldMapping mapping, boolean truncateFirst) {
         String dbName = config.getDbName();
         TransactionTemplate tx = dbPool.getTransactionTemplate(dbName);
         EmptyDataHandling emptyHandling = config.getEmptyDataHandling();
-        List<String> fields = mapping != null ? mapping.getTableFields() : null;
+        List<String> fields = mapping.getTableFields();
 
         return tx.execute(status -> {
+            if (truncateFirst) {
+                targetTableRepository.truncate(config.getDbName(), config.getTableName());
+            }
             int batchSize = SystemConstants.DEFAULT_BATCH_SIZE;
             List<Object[]> batch = new ArrayList<>();
             int totalRecords = 0;
@@ -137,16 +144,10 @@ public class UploadSupport {
                 List<Map<String, Object>> batchChunk = dataIter.next();
                 if (batchChunk.isEmpty()) continue;
 
-                if (fields == null) {
-                    fields = extractFields(batchChunk.get(0));
-                }
-
                 for (Map<String, Object> record : batchChunk) {
                     Object[] values = new Object[fields.size()];
                     for (int i = 0; i < fields.size(); i++) {
-                        values[i] = mapping != null
-                                ? mapping.getValue(record, fields.get(i))
-                                : record.get(fields.get(i));
+                        values[i] = mapping.getValue(record, fields.get(i));
                     }
                     batch.add(values);
 
@@ -172,11 +173,6 @@ public class UploadSupport {
             log.debug("Inserted {} records in single transaction", totalRecords);
             return totalRecords;
         });
-    }
-
-    /** 获取字段名列表 */
-    private static List<String> extractFields(Map<String, Object> record) {
-        return record.keySet().stream().toList();
     }
 
     /**

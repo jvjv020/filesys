@@ -52,15 +52,14 @@ public class SingleDownloadHandler implements TransferHandler {
         if (!checksPassed) return;
 
         // Phase 2: DB-only work (no FTP client held)
-        int dbRecordCount = -1;
+        int dbRecordCount;
         if (command.getAuditCount() != null && command.getAuditCount() >= 0) {
             dbRecordCount = support.preAudit(config, command.getAuditCount());
             if (dbRecordCount < 0) {
                 result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-audit failed");
                 return;
             }
-        }
-        if (dbRecordCount < 0) {
+        } else {
             dbRecordCount = support.countRecords(config);
         }
 

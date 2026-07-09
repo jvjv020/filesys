@@ -75,11 +75,12 @@ public class ChildCommandMonitor {
      *
      * @param mainCommandId    主命令 ID
      * @param expectedChildren 期望的子命令数量
+     * @param dbName           主命令所在数据源(用于写指令表和结果表)
      */
-    public void start(Long mainCommandId, int expectedChildren) {
+    public void start(Long mainCommandId, int expectedChildren, String dbName) {
         Thread t = new Thread(() -> {
             try {
-                runMonitor(mainCommandId, expectedChildren);
+                runMonitor(mainCommandId, expectedChildren, dbName);
             } catch (Throwable th) {
                 log.error("Child command monitor crashed for cmd {}: {}", mainCommandId, th.getMessage(), th);
             }
@@ -89,39 +90,37 @@ public class ChildCommandMonitor {
     }
 
     /**
-     * 实际轮询逻辑(在后台 daemon 线程中执行)
+     * 实际轮询逻辑(在后台线程中执行)。
+     * <p>使用 {@link SystemConstants#MONITOR_INTERVAL_MS} 固定间隔,
+     * {@link SystemConstants#MONITOR_MAX_ITERATIONS} 限制最大轮询次数,
+     * 超时后强制更新主命令为 ERROR,防止永久卡在 PROCESSING。
      */
-    private void runMonitor(Long mainCommandId, int expectedChildren) {
+    private void runMonitor(Long mainCommandId, int expectedChildren, String dbName) {
         LogUtils.setTaskId(mainCommandId);
-        log.info("Starting monitor for main command: {}, expected children: {}", mainCommandId, expectedChildren);
+        log.info("Starting monitor for main command: {}, expected children: {}",
+                mainCommandId, expectedChildren);
         int completed = 0;
 
-        // 轮询检查子命令完成情况(指数退避:初始 1s,最大 10s)
-        long pollInterval = 1000L;
-        long maxInterval = 10000L;
         for (int i = 0; i < SystemConstants.MONITOR_MAX_ITERATIONS; i++) {
             completed = countCompletedChildren(mainCommandId);
             log.info("Completed children: {}/{}", completed, expectedChildren);
 
             if (completed >= expectedChildren) {
                 log.info("All children completed for main command: {}", mainCommandId);
-                updateMainCommandStatus(mainCommandId);
+                updateMainCommandStatus(mainCommandId, dbName);
                 return;
             }
 
             try {
-                Thread.sleep(pollInterval);
+                Thread.sleep(SystemConstants.MONITOR_INTERVAL_MS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
             }
-            // 退避:每次翻倍直到上限
-            pollInterval = Math.min(pollInterval * 2, maxInterval);
         }
 
         log.error("Monitor timeout for main command: {}, completed: {}/{}", mainCommandId, completed, expectedChildren);
-        // 超时时也尝试更新主命令状态，防止永远卡在PROCESSING
-        updateMainCommandStatusOnTimeout(mainCommandId);
+        updateMainCommandStatusOnTimeout(mainCommandId, dbName);
     }
 
     /** 统计已完成的子命令数量 */
@@ -134,13 +133,12 @@ public class ChildCommandMonitor {
     }
 
     /** 超时时更新主命令状态为ERROR */
-    private void updateMainCommandStatusOnTimeout(Long mainCommandId) {
+    private void updateMainCommandStatusOnTimeout(Long mainCommandId, String dbName) {
         try {
-            // UPDATE 指令表 + INSERT 结果表 原子化,避免"指令置终态但结果表未写"
-            dbPool.getTransactionTemplate(ColumnNames.DEFAULT_DB).execute(status -> {
+            String resolvedDb = dbName != null ? dbName : ColumnNames.DEFAULT_DB;
+            dbPool.getTransactionTemplate(resolvedDb).execute(status -> {
                 commandRepository.updateMainStatus(mainCommandId, ColumnNames.STATUS_ERROR);
-                // 写入结果表(超时)— cat/ctrl 从明细行查不到,传 null 让 ResultRepository 写空
-                resultRepository.insertSimple(mainCommandId, null, null, ColumnNames.STATUS_ERROR, "Monitor timeout");
+                resultRepository.insertSimple(mainCommandId, null, null, ColumnNames.STATUS_ERROR, "Monitor timeout", resolvedDb);
                 return null;
             });
             log.info("Updated main command status to ERROR on timeout: {}", mainCommandId);
@@ -153,7 +151,7 @@ public class ChildCommandMonitor {
      * 更新主命令状态
      * 根据所有明细状态汇总：全成功→SUCCESS，有错误→ERROR，有跳过→SKIPPED
      */
-    private void updateMainCommandStatus(Long mainCommandId) {
+    private void updateMainCommandStatus(Long mainCommandId, String dbName) {
         List<Detail> details = detailRepository.findByCommandId(mainCommandId);
 
         boolean hasError = false;
@@ -191,10 +189,11 @@ public class ChildCommandMonitor {
 
         // 复用本方法已查到的 categoryCode/controlCode,不再二次 findByCommandId
         String description = String.format("Multi-node summary: %d detail(s)", details.size());
+        String resolvedDb = dbName != null ? dbName : ColumnNames.DEFAULT_DB;
         // UPDATE 指令表 + INSERT 结果表 原子化,避免"指令置终态但结果表未写"
-        dbPool.getTransactionTemplate(ColumnNames.DEFAULT_DB).execute(status -> {
+        dbPool.getTransactionTemplate(resolvedDb).execute(status -> {
             commandRepository.updateMainStatus(mainCommandId, finalStatus);
-            resultRepository.insertSimple(mainCommandId, categoryCode, controlCode, finalStatus, description);
+            resultRepository.insertSimple(mainCommandId, categoryCode, controlCode, finalStatus, description, resolvedDb);
             return null;
         });
         log.info("Updated main command status: {} -> {}", mainCommandId, finalStatus);

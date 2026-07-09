@@ -30,6 +30,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntFunction;
 
 /**
@@ -107,7 +109,8 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         BucketResult bucketResult = new BucketResult();
         ConcurrentLinkedQueue<String> generatedFiles = new ConcurrentLinkedQueue<>();
 
-        ExecutorService bucketExecutor = batchExecutorFactory.apply(Math.max(1, buckets.size()));
+        int concurrency = config.getConcurrency() != null ? config.getConcurrency() : 3;
+        ExecutorService bucketExecutor = batchExecutorFactory.apply(Math.max(1, Math.min(buckets.size(), concurrency)));
         try {
             for (Detail bucket : buckets) {
                 bucketExecutor.execute(() -> processBucketParallel(
@@ -119,7 +122,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         }
 
         // ===== Phase 5: 总标志文件(仅在所有桶成功时生成) =====
-        if (bucketResult.allSuccess && postOps != null && postOps.contains("TOTAL")) {
+        if (bucketResult.allSuccess.get() && postOps != null && postOps.contains("TOTAL")) {
             transferSupport.executeWithClient(config.getFtpName(), postClient -> {
                 String totalFlagOps = FlagFileService.filterOpsByType(postOps, "TOTAL");
                 flagFileService.process(postClient, totalFlagOps, baseFileInfo, null);
@@ -139,14 +142,14 @@ public class SingleNodeDownloadHandler implements TransferHandler {
                     }
                     return null;
                 });
-                bucketResult.allSuccess = false;
-                bucketResult.failedCount++;
+                bucketResult.allSuccess.set(false);
+                bucketResult.failedCount.incrementAndGet();
             }
         }
 
-        result.setOutcome(bucketResult.totalRecordCount,
-                DownloadSupport.determineMainStatus(bucketResult.allSuccess,
-                        bucketResult.failedCount, bucketResult.skippedCount), "");
+        result.setOutcome(bucketResult.totalRecordCount.get(),
+                DownloadSupport.determineMainStatus(bucketResult.allSuccess.get(),
+                        bucketResult.failedCount.get(), bucketResult.skippedCount.get()), "");
     }
 
     private static void shutdownExecutor(ExecutorService executor, Long commandId) {
@@ -163,10 +166,10 @@ public class SingleNodeDownloadHandler implements TransferHandler {
     }
 
     private static class BucketResult {
-        volatile int totalRecordCount;
-        volatile int failedCount;
-        volatile int skippedCount;
-        volatile boolean allSuccess = true;
+        final AtomicInteger totalRecordCount = new AtomicInteger(0);
+        final AtomicInteger failedCount = new AtomicInteger(0);
+        final AtomicInteger skippedCount = new AtomicInteger(0);
+        final AtomicBoolean allSuccess = new AtomicBoolean(true);
     }
 
     /**
@@ -193,7 +196,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         if (!transferSupport.handleEmptyData(recordCount, config.getEmptyDataHandling())) {
             boolean isError = config.getEmptyDataHandling() == EmptyDataHandling.ERROR;
             markBucketFailed(result, bucket, config, isError);
-            if (!isError) result.skippedCount++;
+            if (!isError) result.skippedCount.incrementAndGet();
             return;
         }
 
@@ -218,7 +221,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
 
             support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_SUCCESS, config.getNodeId());
             log.info("Downloaded file for bucket value: {}", fieldValue);
-            result.totalRecordCount += recordCount;
+            result.totalRecordCount.addAndGet(recordCount);
         } catch (Exception e) {
             log.error("Bucket processing crashed: {}", fieldValue, e);
             markBucketFailed(result, bucket, config);
@@ -247,8 +250,8 @@ public class SingleNodeDownloadHandler implements TransferHandler {
     }
 
     private void markBucketFailed(BucketResult result, Detail bucket, TransferConfig config, boolean isError) {
-        result.allSuccess = false;
-        if (isError) result.failedCount++;
+        result.allSuccess.set(false);
+        if (isError) result.failedCount.incrementAndGet();
         support.updateDetailStatusForBucket(bucket,
                 isError ? ColumnNames.STATUS_ERROR : ColumnNames.STATUS_SKIPPED, config.getNodeId());
     }

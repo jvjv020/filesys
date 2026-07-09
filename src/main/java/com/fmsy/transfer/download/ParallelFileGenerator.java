@@ -169,15 +169,11 @@ public class ParallelFileGenerator {
             String partitionName = partitions.get(i);
             Path tempFile = tempFiles.get(i);
 
-            // 已有分区失败 → 取消未开始的 Future(已运行的让其完成,但丢弃其输出)
+            // 已有分区失败 → 取消未开始的 Future
             if (anyFailed.get()) {
                 Future<?> f = futures.get(i);
                 if (!f.isDone()) {
-                    if (f.cancel(false)) {
-                        log.warn("Parallel[{}] partition {} cancelled (prior failure)", tag, partitionName);
-                    } else {
-                        log.warn("Parallel[{}] partition {} already running, letting it finish (output discarded)", tag, partitionName);
-                    }
+                    f.cancel(false);
                 }
                 continue;
             }
@@ -191,13 +187,11 @@ public class ParallelFileGenerator {
                 Thread.currentThread().interrupt();
                 anyFailed.set(true);
                 log.error("Parallel[{}] partition {} interrupted, abandoning remaining partitions", tag, partitionName);
-                cancelUnstarted(futures, i + 1, partitions, tag);
                 break;
             } catch (ExecutionException e) {
                 anyFailed.set(true);
                 log.error("Parallel[{}] partition {} failed: {}, abandoning remaining partitions",
                         tag, partitionName, e.getCause().getMessage());
-                cancelUnstarted(futures, i + 1, partitions, tag);
                 continue;
             }
 
@@ -233,23 +227,6 @@ public class ParallelFileGenerator {
         }
         cleanupTempDir(tempDir);
         return totalCount.get();
-    }
-
-    /**
-     * 取消从 startIndex 开始的未开始 Future。
-     * 已在运行的 Future 不取消(cancel(false) 对 running 线程是 no-op),
-     * 其临时文件由 cleanupTempDir 清理。
-     */
-    private void cancelUnstarted(List<Future<?>> futures, int startIndex,
-                                  List<String> partitions, String tag) {
-        for (int i = startIndex; i < futures.size(); i++) {
-            Future<?> f = futures.get(i);
-            if (!f.isDone()) {
-                if (f.cancel(false)) {
-                    log.warn("Parallel[{}] partition {} cancelled due to prior failure", tag, partitions.get(i));
-                }
-            }
-        }
     }
 
     /** 统计仍存在的临时文件数(有内容,未被拼接删除) */

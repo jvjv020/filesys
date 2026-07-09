@@ -52,7 +52,7 @@ public abstract class AbstractTransferOrchestrator {
             result.failWith(e);
         } finally {
             finalize(command, config, result);
-            startChildMonitorIfNeeded(command, result);
+            startChildMonitorIfNeeded(command, config, result);
         }
     }
 
@@ -62,16 +62,20 @@ public abstract class AbstractTransferOrchestrator {
     protected abstract void dispatch(Command command, TransferConfig config, Result result) throws Exception;
 
     /**
-     * 收尾:组装 Command/Config 派生字段 → 写指令表(非 MultiNode 抑制) → 写结果表。
-     * <p>UPDATE 指令表 + INSERT 结果表 包在事务中:避免"指令已置终态但结果表未写"
+     * 收尾:组装 Command/Config 派生字段 → 写指令表(非 MultiNode 抑制) → 写结果表(非 MultiNode 抑制)。
+     * <p>MultiNode 模式(markChildrenCreated)下,结果表由 {@link ChildCommandMonitor}
+     * 在所有子命令完成后统一写入,此处跳过以避免"PROCESSING 结果行 + 最终结果行"重复。
+     * UPDATE 指令表 + INSERT 结果表 包在事务中:避免"指令已置终态但结果表未写"
      * 的状态(下一个超时周期才兜底为 ERROR,期间业务可见性偏差)。
      */
     private void finalize(Command command, TransferConfig config, Result result) {
         result.markEnd(command, config);
+        if (result.isSuppressStatusUpdate()) {
+            // MultiNode:结果行由 ChildCommandMonitor 在子命令完成后写入,此处跳过
+            return;
+        }
         dbPool.getTransactionTemplate(config.getDbName()).execute(status -> {
-            if (!result.isSuppressStatusUpdate()) {
-                commandRepository.updateStatus(command.getId(), result.getResult());
-            }
+            commandRepository.updateStatus(command.getId(), result.getResult());
             resultRepository.insert(result);
             return null;
         });
@@ -81,12 +85,12 @@ public abstract class AbstractTransferOrchestrator {
      * MultiNode Download 子命令创建后启动后台监控线程。
      * 由 Handler 通过 {@link Result#markChildrenCreated(int)} 触发,本方法仅在 finally 中检测 flag。
      */
-    private void startChildMonitorIfNeeded(Command command, Result result) {
+    private void startChildMonitorIfNeeded(Command command, TransferConfig config, Result result) {
         if (!result.isNeedsChildMonitor()) {
             return;
         }
         try {
-            childCommandMonitor.start(command.getId(), result.getExpectedChildren());
+            childCommandMonitor.start(command.getId(), result.getExpectedChildren(), config.getDbName());
         } catch (Exception e) {
             log.error("Failed to start child command monitor for cmd {}: {}",
                     command.getId(), e.getMessage(), e);
