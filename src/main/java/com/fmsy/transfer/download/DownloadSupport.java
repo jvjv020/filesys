@@ -175,24 +175,10 @@ public class DownloadSupport {
     // ==================== 跨场景主状态判定 ====================
 
     /**
-     * DOWNLOAD_SINGLE_NODE 返回值 — 桶级汇总。
-     */
-    public record BucketSummary(int totalRecords, boolean allFilesSuccess,
-                                 int failedCount, int skippedCount) {
-    }
-
-    /**
      * P0 #1:根据桶/文件汇总结果判定主指令最终状态(SingleNode 用)。
      */
     public static String determineMainStatus(boolean allSuccess, int failedCount, int skippedCount) {
         return TransferSupport.determineMainStatus(allSuccess, failedCount, skippedCount);
-    }
-
-    /**
-     * BucketSummary 重载 — 桶级汇总转主状态。
-     */
-    public static String determineMainStatus(BucketSummary summary) {
-        return determineMainStatus(summary.allFilesSuccess(), summary.failedCount(), summary.skippedCount());
     }
 
     /**

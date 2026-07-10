@@ -8,8 +8,10 @@ import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.CommandType;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.enums.EmptyDataHandling;
+import com.fmsy.fileops.FlagFileService;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.ftp.FtpPool;
+import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.lifecycle.ShutdownService;
 import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
@@ -20,11 +22,9 @@ import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.ResultRepository;
 import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.BucketDistributor;
-import com.fmsy.transfer.TempTransferConfigFactory;
-import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.transfer.FieldMappingBuilder;
+import com.fmsy.transfer.TempTransferConfigFactory;
 import com.fmsy.transfer.TransferSupport;
-import com.fmsy.fileops.FlagFileService;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.FilePathUtils;
 import com.fmsy.util.LogUtils;
@@ -82,7 +82,6 @@ public class DetailPollingService {
     private final FtpPool ftpPool;
     private final TransferSupport transferSupport;
     private final FieldMappingBuilder fieldMappingBuilder;
-    private final FlagFileService flagFileService;
     private final AuditService auditService;
     private final ResultRepository resultRepository;
     /** 每子命令独立的批处理线程池工厂 */
@@ -359,9 +358,7 @@ public class DetailPollingService {
             String subFlagOnly = FlagFileService.filterOpsByType(
                     config.getPostOperations(), "SUB");
             if (subFlagOnly != null) {
-                Map<String, String> extra = new java.util.HashMap<>();
-                extra.put("C", String.valueOf(recordCount));
-                flagFileService.process(client, subFlagOnly, fileInfo, extra);
+                transferSupport.postProcess(client, subFlagOnly, fileInfo, recordCount);
             }
         } catch (Exception e) {
             log.error("Failed to process bucket: {}", bucket.getId(), e);

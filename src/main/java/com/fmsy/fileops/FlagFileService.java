@@ -12,7 +12,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.List;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -89,6 +89,7 @@ public class FlagFileService {
         for (String op : opsStr.split(",")) {
             String[] parts = op.split(";");
             String keyword = parts.length > 0 ? parts[0].trim() : "";
+            if (keyword.isEmpty()) continue; // 跳过空段
 
             switch (keyword) {
                 case "READY" -> {
@@ -157,12 +158,10 @@ public class FlagFileService {
         // 解析 mode:  [@|#]L|M|S[=|>|<|>=|<=|!=]
         String metricStr;
         String comparison = "=";
-        String src = "#"; // 默认从数据文件计算
 
         String m = mode.trim();
         if (m.startsWith("@") || m.startsWith("#")) {
-            src = m.substring(0, 1);
-            m = m.substring(1);
+            m = m.substring(1); // 剥离 @/# 前缀
         }
 
         // 提取比较符
@@ -194,11 +193,12 @@ public class FlagFileService {
         return pass;
     }
 
-    /** 读取标志文件内容（首行） */
+    /** 读取标志文件内容（首行，清理 \r 残留） */
     private String readFlagContent(FtpClient client, String path) {
         try (InputStream is = client.getInputStream(path);
              BufferedReader reader = new BufferedReader(new InputStreamReader(is))) {
-            return reader.readLine();
+            String line = reader.readLine();
+            return line != null ? line.replace("\r", "") : null;
         } catch (Exception e) {
             log.error("Failed to read flag file: {}", path, e);
             return null;
@@ -272,17 +272,14 @@ public class FlagFileService {
             String[] parts = op.split(";");
             if (parts.length == 0) continue;
             String keyword = parts[0].trim();
+            if (keyword.isEmpty()) continue; // 跳过空段
             FlagOperation operation = operations.get(keyword);
             if (operation == null) {
                 log.warn("Unknown post-operation keyword: {}", keyword);
                 continue;
             }
             try {
-                if (operation instanceof GenerateOp gen) {
-                    gen.execute(client, parts, fileInfo, extraValues);
-                } else {
-                    operation.execute(client, parts);
-                }
+                operation.execute(client, parts, fileInfo, extraValues);
             } catch (Exception e) {
                 log.error("Failed to process operation: {}", keyword, e);
             }
@@ -306,10 +303,9 @@ public class FlagFileService {
         if (raw == null || raw.isEmpty()) return raw;
         if (raw.startsWith("/")) return raw; // 绝对路径，不变
         if (fileInfo == null || fileInfo.dir() == null || fileInfo.dir().isEmpty()) return raw;
-        // 先对 raw 做文件衍生变量替换
+        // 先对 raw 做文件衍生变量替换，再通过 ResolvedPath 做路径继承
         String resolved = contentEngine.expandPathVariables(raw, fileInfo);
-        String full = fileInfo.dir() + "/" + resolved;
-        return normalizePath(full);
+        return normalizePath(fileInfo.resolveRelative(resolved));
     }
 
     /**
@@ -319,7 +315,7 @@ public class FlagFileService {
     static String normalizePath(String path) {
         if (path == null || !path.contains("..")) return path;
         String[] segments = path.split("/");
-        java.util.ArrayList<String> result = new java.util.ArrayList<>();
+        ArrayList<String> result = new ArrayList<>();
         for (String seg : segments) {
             if ("..".equals(seg)) {
                 if (!result.isEmpty()) result.remove(result.size() - 1);
@@ -341,24 +337,14 @@ public class FlagFileService {
         StringBuilder sb = new StringBuilder();
         for (String op : operationsStr.split(",")) {
             String[] parts = op.split(";");
-            if (parts.length > 0 && opType.equalsIgnoreCase(parts[0].trim())) {
+            String keyword = parts.length > 0 ? parts[0].trim() : "";
+            if (keyword.isEmpty()) continue; // 跳过空段
+            if (opType.equalsIgnoreCase(keyword)) {
                 if (sb.length() > 0) sb.append(",");
                 sb.append(op);
             }
         }
         return sb.length() == 0 ? null : sb.toString();
-    }
-
-    /**
-     * 从文件路径中提取所在目录的目录名（最后一段路径）。
-     */
-    public static String extractDirname(String filePath) {
-        if (filePath == null) return null;
-        int lastSlash = filePath.lastIndexOf('/');
-        if (lastSlash < 0) return filePath;
-        String dir = filePath.substring(0, lastSlash);
-        int secondLastSlash = dir.lastIndexOf('/');
-        return secondLastSlash >= 0 ? dir.substring(secondLastSlash + 1) : dir;
     }
 
     // ==================== 模式码引擎 ====================
@@ -475,6 +461,12 @@ public class FlagFileService {
 
     interface FlagOperation {
         void execute(FtpClient client, String[] parts) throws Exception;
+
+        /** 带文件衍生信息的执行方法，默认委托给无参版本 */
+        default void execute(FtpClient client, String[] parts,
+                             ResolvedPath fileInfo, Map<String, String> extraValues) throws Exception {
+            execute(client, parts);
+        }
     }
 
     /** 生成标志/反馈文件操作 */
@@ -493,15 +485,16 @@ public class FlagFileService {
             execute(client, parts, null, null);
         }
 
-        void execute(FtpClient client, String[] parts, ResolvedPath fileInfo,
+        @Override
+        public void execute(FtpClient client, String[] parts, ResolvedPath fileInfo,
                       Map<String, String> extraValues) throws Exception {
             String filePattern = parts.length > 1 ? parts[1].trim() : "";
             String content = parts.length > 2 ? parts[2].trim() : "";
 
             // 路径继承 + .. 规范化
             if (fileInfo != null && !filePattern.startsWith("/")) {
-                filePattern = contentEngine.expandPathVariables(filePattern, fileInfo);
-                filePattern = normalizePath(fileInfo.dir() + "/" + filePattern);
+                filePattern = normalizePath(fileInfo.resolveRelative(
+                        contentEngine.expandPathVariables(filePattern, fileInfo)));
             }
 
             // 内容模式码展开
@@ -576,9 +569,5 @@ public class FlagFileService {
         }
     }
 
-    // ==================== 检查结果枚举 ====================
-
-    public enum CheckResult {
-        PASS, SKIP, ERROR
-    }
 }
+

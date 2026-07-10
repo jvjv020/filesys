@@ -15,6 +15,7 @@ import com.fmsy.transfer.BucketDistributor;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
+import static com.fmsy.transfer.TransferSupport.determineMainStatus;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.FilePathUtils;
 import com.fmsy.util.ResolvedPath;
@@ -24,7 +25,6 @@ import org.springframework.stereotype.Component;
 
 import java.io.OutputStream;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -45,7 +45,6 @@ public class SingleNodeDownloadHandler implements TransferHandler {
     private final FtpPool ftpPool;
     private final BucketDistributor bucketDistributor;
     private final TargetTableRepository targetTableRepository;
-    private final FlagFileService flagFileService;
     private final FieldMappingBuilder fieldMappingBuilder;
     private final IntFunction<ExecutorService> batchExecutorFactory;
     private final DownloadSupport support;
@@ -60,7 +59,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         String splitFields = config.getSplitFields();
         if (splitFields == null || splitFields.isEmpty()) {
             log.warn("No split fields configured for DOWNLOAD_SINGLE_NODE");
-            result.setOutcome(0, DownloadSupport.determineMainStatus(true, 0, 0), "");
+            result.setOutcome(0, determineMainStatus(true, 0, 0), "");
             return;
         }
         String postOps = config.getPostOperations();
@@ -69,7 +68,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         baseFileInfo = transferSupport.resolveFilePath(config.getFilePath(), command);
         boolean preCheckOk = transferSupport.executeWithClient(config.getFtpName(), client -> {
             if (!transferSupport.preCheck(client, config, baseFileInfo)) {
-                result.setOutcome(0, DownloadSupport.determineMainStatus(false, 0, 1), "Pre-check failed");
+                result.setOutcome(0, determineMainStatus(false, 0, 1), "Pre-check failed");
                 return false;
             }
             String parentDir = FilePathUtils.extractParentDirectory(baseFileInfo.fullPath());
@@ -83,7 +82,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         // ===== Phase 2: SERIAL 模式顶层 pre-audit =====
         if (commandType != CommandType.BATCH && command.getAuditCount() != null && command.getAuditCount() >= 0) {
             if (!support.preAudit(config, command.getAuditCount())) {
-                result.setOutcome(0, DownloadSupport.determineMainStatus(false, 0, 1), "Pre-audit failed");
+                result.setOutcome(0, determineMainStatus(false, 0, 1), "Pre-audit failed");
                 return;
             }
         }
@@ -94,7 +93,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
             buckets = bucketDistributor.getBuckets(command.getId(), Integer.MAX_VALUE);
             if (buckets.isEmpty()) {
                 log.info("No buckets found for BATCH command: {}", command.getId());
-                result.setOutcome(0, DownloadSupport.determineMainStatus(true, 0, 0), "");
+                result.setOutcome(0, determineMainStatus(true, 0, 0), "");
                 return;
             }
         } else {
@@ -123,11 +122,13 @@ public class SingleNodeDownloadHandler implements TransferHandler {
 
         // ===== Phase 5: 总标志文件(仅在所有桶成功时生成) =====
         if (bucketResult.allSuccess.get() && postOps != null && postOps.contains("TOTAL")) {
-            transferSupport.executeWithClient(config.getFtpName(), postClient -> {
-                String totalFlagOps = FlagFileService.filterOpsByType(postOps, "TOTAL");
-                flagFileService.process(postClient, totalFlagOps, baseFileInfo, null);
-                return null;
-            });
+            String totalFlagOps = FlagFileService.filterOpsByType(postOps, "TOTAL");
+            if (totalFlagOps != null) {
+                transferSupport.executeWithClient(config.getFtpName(), postClient -> {
+                    transferSupport.postProcess(postClient, totalFlagOps, baseFileInfo);
+                    return null;
+                });
+            }
         }
 
         if (command.getAuditCount() != null && command.getAuditCount() >= 0) {
@@ -148,7 +149,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         }
 
         result.setOutcome(bucketResult.totalRecordCount.get(),
-                DownloadSupport.determineMainStatus(bucketResult.allSuccess.get(),
+                determineMainStatus(bucketResult.allSuccess.get(),
                         bucketResult.failedCount.get(), bucketResult.skippedCount.get()), "");
     }
 
@@ -214,10 +215,8 @@ public class SingleNodeDownloadHandler implements TransferHandler {
             generatedFiles.add(targetFileInfo.fullPath());
 
             // 每桶 sub-flag
-            Map<String, String> extra = new HashMap<>();
-            extra.put("C", String.valueOf(recordCount));
             String subFlagOnly = FlagFileService.filterOpsByType(config.getPostOperations(), "SUB");
-            flagFileService.process(client, subFlagOnly, targetFileInfo, extra);
+            transferSupport.postProcess(client, subFlagOnly, targetFileInfo, recordCount);
 
             support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_SUCCESS, config.getNodeId());
             log.info("Downloaded file for bucket value: {}", fieldValue);

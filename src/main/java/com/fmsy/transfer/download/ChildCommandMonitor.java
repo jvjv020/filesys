@@ -13,6 +13,7 @@ import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.ResultRepository;
 import com.fmsy.transfer.TempTransferConfigFactory;
+import com.fmsy.transfer.TransferSupport;
 import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
@@ -46,7 +47,7 @@ public class ChildCommandMonitor {
     private final DetailRepository detailRepository;
     private final ConfigLoaderService configLoader;
     private final FtpPool ftpPool;
-    private final FlagFileService flagFileService;
+    private final TransferSupport transferSupport;
     private final ResultRepository resultRepository;
     private final CommandRepository commandRepository;
     private final DataSourceConfig.DbPool dbPool;
@@ -54,13 +55,14 @@ public class ChildCommandMonitor {
 
     public ChildCommandMonitor(DetailRepository detailRepository,
                                ConfigLoaderService configLoader, FtpPool ftpPool,
-                               FlagFileService flagFileService, ResultRepository resultRepository,
+                               TransferSupport transferSupport,
+                               ResultRepository resultRepository,
                                CommandRepository commandRepository,
                                DataSourceConfig.DbPool dbPool) {
         this.detailRepository = detailRepository;
         this.configLoader = configLoader;
         this.ftpPool = ftpPool;
-        this.flagFileService = flagFileService;
+        this.transferSupport = transferSupport;
         this.resultRepository = resultRepository;
         this.commandRepository = commandRepository;
         this.dbPool = dbPool;
@@ -216,7 +218,7 @@ public class ChildCommandMonitor {
                     log.info("Generating total flag for main command: {}", mainCommandId);
                     ResolvedPath fileInfo = ResolvedPath.of(config.getFilePath());
                     ftpPool.withClient(config.getFtpName(), client ->
-                            flagFileService.process(client, totalFlagOnlyOps, fileInfo, null));
+                            transferSupport.postProcess(client, totalFlagOnlyOps, fileInfo));
                 }
             }
         }

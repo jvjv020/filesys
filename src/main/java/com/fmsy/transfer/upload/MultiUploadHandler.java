@@ -25,7 +25,6 @@ import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -128,10 +127,8 @@ public class MultiUploadHandler implements TransferHandler {
         }
 
         // Phase 3: postProcess
-        Map<String, String> extra = new HashMap<>();
-        extra.put("C", String.valueOf(totalRecords));
         transferSupport.executeWithClient(ftpName, client -> {
-            transferSupport.postProcess(client, config, dirInfo, extra);
+            transferSupport.postProcess(client, config, dirInfo, totalRecords);
             return null;
         });
 
@@ -207,10 +204,8 @@ public class MultiUploadHandler implements TransferHandler {
         }
 
         // Phase 3 (FTP): postProcess
-        Map<String, String> extra = new HashMap<>();
-        extra.put("C", String.valueOf(totalRecords));
         transferSupport.executeWithClient(ftpName, client -> {
-            transferSupport.postProcess(client, config, lastFileInfo, extra);
+            transferSupport.postProcess(client, config, lastFileInfo, totalRecords);
             return null;
         });
 

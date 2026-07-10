@@ -122,6 +122,46 @@ public class TransferSupport {
     }
 
     /**
+     * 后置处理 — 简写版本，自动将 recordCount 设为 C 值。
+     */
+    public void postProcess(FtpClient client, TransferConfig config,
+                             ResolvedPath fileInfo, int recordCount) {
+        Map<String, String> extra = new HashMap<>(1);
+        extra.put("C", String.valueOf(recordCount));
+        postProcess(client, config, fileInfo, extra);
+    }
+
+    /**
+     * 后置处理 — 使用显式操作字符串（不走 config），供 SingleNodeDownloadHandler 等需要按类型过滤的场景。
+     *
+     * @param postOps 显式后置操作字符串（例如 filterOpsByType 的输出），为 null/空时不执行
+     */
+    public void postProcess(FtpClient client, String postOps,
+                             ResolvedPath fileInfo, Map<String, String> extraValues) {
+        if (postOps != null && !postOps.isEmpty()) {
+            flagFileService.process(client, postOps, fileInfo, extraValues);
+        }
+    }
+
+    /**
+     * 后置处理 — 显式操作字符串，无额外值（用于 TOTAL 等不需要 C 值的场景）。
+     */
+    public void postProcess(FtpClient client, String postOps,
+                             ResolvedPath fileInfo) {
+        postProcess(client, postOps, fileInfo, (Map<String, String>) null);
+    }
+
+    /**
+     * 后置处理 — 显式操作字符串 + recordCount 简写版。
+     */
+    public void postProcess(FtpClient client, String postOps,
+                             ResolvedPath fileInfo, int recordCount) {
+        Map<String, String> extra = new HashMap<>(1);
+        extra.put("C", String.valueOf(recordCount));
+        postProcess(client, postOps, fileInfo, extra);
+    }
+
+    /**
      * 空数据处理 — 根据配置处理无数据的情况。
      *
      * @param recordCount 实际记录数

@@ -19,7 +19,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -66,10 +65,8 @@ public class SingleUploadHandler implements TransferHandler {
 
         // Phase 3 (FTP): postProcess — only when phase 2 succeeded without errors
         if (recordCount >= 0) {
-            Map<String, String> extra = new HashMap<>();
-            extra.put("C", String.valueOf(recordCount));
             transferSupport.executeWithClient(ftpName, client -> {
-                transferSupport.postProcess(client, config, fileInfo, extra);
+                transferSupport.postProcess(client, config, fileInfo, recordCount);
                 return null;
             });
             result.setOutcome(recordCount, ColumnNames.STATUS_SUCCESS, "");

@@ -15,7 +15,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.OutputStream;
-import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -79,9 +78,7 @@ public class SingleDownloadHandler implements TransferHandler {
                 count = parallelFileGenerator.generate(os, config, converter, mapping, dbRecordCount);
                 client.completePendingCommand();
             }
-            Map<String, String> extra = new HashMap<>();
-            extra.put("C", String.valueOf(count));
-            transferSupport.postProcess(client, config, fileInfo, extra);
+            transferSupport.postProcess(client, config, fileInfo, count);
             return count;
         });
 
