@@ -283,7 +283,6 @@ public class DetailPollingService {
 
     /** 处理单个桶的数据,返回处理结果(供外层汇总) */
     private BucketOutcome processBucket(Detail bucket, String nodeId, TransferConfig config) {
-        // config 由调用方传入(已通过 resolveTempConfig 解析),直接使用
         if (config == null) {
             log.warn("No config found for bucket: {}, category={}, control={}",
                     bucket.getId(), bucket.getCategoryCode(), bucket.getControlCode());
@@ -292,8 +291,32 @@ public class DetailPollingService {
         }
 
         // Phase 1: DB-only checks (no FTP client held)
+        int recordCount = phase1DbChecks(bucket, nodeId, config);
+        if (recordCount < 0) {
+            return recordCount == -2 ? BucketOutcome.FAILED : BucketOutcome.SKIPPED;
+        }
+
+        Map<String, String> bucketContext = transferSupport.buildContext(
+                null, config.getSplitFields(), bucket.getFieldValue());
+        ResolvedPath fileInfo = transferSupport.resolveFilePath(config.getFilePath(), bucketContext);
+
+        // Phase 2: FTP data transfer
+        long startTime = System.currentTimeMillis();
+        BucketOutcome outcome = phase2FtpTransfer(bucket, config, fileInfo, recordCount, nodeId);
+        if (outcome != BucketOutcome.SUCCESS) {
+            return outcome;
+        }
+
+        // Phase 3: post-audit + status update
+        return phase3PostAudit(bucket, config, fileInfo, recordCount, startTime, nodeId);
+    }
+
+    /**
+     * Phase 1 — DB-only 检查:配置校验、预审计、空数据处理。
+     * @return ≥0 记录数(通过); -1 跳过(SKIPPED); -2 失败(FAILED)
+     */
+    private int phase1DbChecks(Detail bucket, String nodeId, TransferConfig config) {
         String splitFields = config.getSplitFields();
-        // 优先从 preAudit 获取桶记录数，避免二次 countByBucket
         int recordCount = -1;
         Integer detailAuditCount = bucket.getAuditCount();
         if (detailAuditCount != null && detailAuditCount >= 0) {
@@ -302,7 +325,7 @@ public class DetailPollingService {
             if (recordCount < 0) {
                 log.error("Pre-audit failed for bucket: {}", bucket.getId());
                 detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_SKIPPED, nodeId);
-                return BucketOutcome.SKIPPED;
+                return -1;
             }
         }
         if (recordCount < 0) {
@@ -313,23 +336,24 @@ public class DetailPollingService {
         EmptyDataHandling emptyHandling = config.getEmptyDataHandling();
         if (!transferSupport.handleEmptyData(recordCount, emptyHandling)) {
             log.warn("Empty data handling for bucket: {}", bucket.getFieldValue());
-            // handleEmptyData 仅在 ERROR 或 SKIP 时返回 false，else 不可达
             if (emptyHandling == EmptyDataHandling.ERROR) {
                 detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_ERROR, nodeId);
-                return BucketOutcome.FAILED;
+                return -2;
             } else {
                 detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_SKIPPED, nodeId);
-                return BucketOutcome.SKIPPED;
+                return -1;
             }
         }
+        return recordCount;
+    }
 
-        Map<String, String> bucketContext = transferSupport.buildContext(
-                null, splitFields, bucket.getFieldValue());
-        ResolvedPath fileInfo = transferSupport.resolveFilePath(config.getFilePath(), bucketContext);
-
-        // Phase 2: FTP operations (borrow client just before use)
+    /**
+     * Phase 2 — FTP 传输:前置检查 → 目录创建 → 文件生成 → sub-flag。
+     * @return SUCCESS 或 FAILED
+     */
+    private BucketOutcome phase2FtpTransfer(Detail bucket, TransferConfig config,
+                                            ResolvedPath fileInfo, int recordCount, String nodeId) {
         FtpClient client = ftpPool.getClient(config.getFtpName());
-        long startTime = System.currentTimeMillis();
         try {
             if (!transferSupport.preCheck(client, config, fileInfo)) {
                 log.error("Pre-check failed for bucket: {}", bucket.getId());
@@ -346,7 +370,7 @@ public class DetailPollingService {
             FieldMapping mapping = fieldMappingBuilder.buildForDownload(config);
 
             try (var data = targetTableRepository.streamBucketData(
-                    config.getDbName(), config.getTableName(), splitFields, bucket.getFieldValue());
+                    config.getDbName(), config.getTableName(), config.getSplitFields(), bucket.getFieldValue());
                  OutputStream os = client.getOutputStream(fileInfo.fullPath())) {
                 converter.generate(os, data, mapping);
                 client.completePendingCommand();
@@ -354,7 +378,6 @@ public class DetailPollingService {
             log.info("Generated file for bucket: {}, path: {}, records: {}",
                     bucket.getId(), fileInfo.fullPath(), recordCount);
 
-            // 每桶 sub-flag：使用新关键字 SUB 和 ResolvedPath
             String subFlagOnly = FlagFileService.filterOpsByType(
                     config.getPostOperations(), "SUB");
             if (subFlagOnly != null) {
@@ -367,8 +390,15 @@ public class DetailPollingService {
         } finally {
             client.close();
         }
+        return BucketOutcome.SUCCESS;
+    }
 
-        // Phase 3: post-audit (borrows its own FTP client internally)
+    /**
+     * Phase 3 — 后审计 + 状态更新。
+     */
+    private BucketOutcome phase3PostAudit(Detail bucket, TransferConfig config,
+                                          ResolvedPath fileInfo, int recordCount,
+                                          long startTime, String nodeId) {
         auditService.postAudit(AuditScenario.DOWNLOAD, config.getFtpName(),
                 config.getTableName(), fileInfo.fullPath(), -1, config.getDbName());
 

@@ -35,6 +35,14 @@ public class AppConfig {
         private String id;
     }
 
+    /**
+     * 便捷方法 — 直接获取当前节点 ID。
+     * 避免调用方写 {@code appConfig.getNode().getId()}。
+     */
+    public String getNodeId() {
+        return node != null ? node.getId() : null;
+    }
+
     /** 轮询配置 */
     @Data
     public static class Polling {

@@ -2,6 +2,7 @@ package com.fmsy.converter;
 
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -17,6 +18,7 @@ import java.util.stream.Collectors;
  * - 初始化时将转换器注册到Map中
  * - get()方法根据parserType快速查找对应的转换器
  */
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class ConverterFactory {
@@ -31,7 +33,12 @@ public class ConverterFactory {
     @PostConstruct
     public void init() {
         converterMap = converters.stream()
-                .collect(Collectors.toMap(FileConverter::getFormat, Function.identity()));
+                .collect(Collectors.toMap(FileConverter::getFormat, Function.identity(),
+                        (existing, replacement) -> {
+                            log.warn("Duplicate converter format '{}', keeping existing: {}",
+                                    existing.getFormat(), existing.getClass().getName());
+                            return existing;
+                        }));
     }
 
     /**

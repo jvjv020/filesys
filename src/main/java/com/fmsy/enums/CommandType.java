@@ -1,5 +1,7 @@
 package com.fmsy.enums;
 
+import lombok.extern.slf4j.Slf4j;
+
 /**
  * 命令类型枚举
  *
@@ -15,6 +17,7 @@ package com.fmsy.enums;
  * - COORDINATED: 'S'
  * - TEMPORARY: 'T'
  */
+@Slf4j
 public enum CommandType {
     SERIAL(null),       // 串行（空）
     BATCH("R"),          // 批量
@@ -42,6 +45,7 @@ public enum CommandType {
                 return type;
             }
         }
+        log.warn("Unknown command type code '{}', defaulting to SERIAL", code);
         return SERIAL;
     }
 }

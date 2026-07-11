@@ -21,6 +21,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 子命令监控器 - DOWNLOAD_MULTI_NODE场景
@@ -68,61 +73,66 @@ public class ChildCommandMonitor {
         this.dbPool = dbPool;
     }
 
+    /** 后台调度器(daemon 线程,不阻塞 JVM 退出) */
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1, r -> {
+        Thread t = new Thread(r, "fmsy-child-monitor");
+        t.setDaemon(true);
+        return t;
+    });
+
     /**
-     * 启动后台监控线程,等待子命令完成。立即返回,真正的轮询逻辑在 {@link #runMonitor} 中。
-     * 监控与主命令生命周期解耦,主命令 Orchestrator 完成 finalize 后即可放手。
+     * 启动后台监控,等待子命令完成。立即返回。
+     * 使用 {@link ScheduledExecutorService} 以固定间隔轮询,避免 {@code Thread.sleep} 原始线程管理。
      *
-     * <p>非 daemon 线程 + ShutdownService 跟踪,确保关闭时监控线程能完成状态更新,
-     * 避免主命令永久卡在 P 状态。
+     * <p>最大轮询次数由 {@link SystemConstants#MONITOR_MAX_ITERATIONS} 限制,
+     * 超时后强制更新主命令为 ERROR,防止永久卡在 P 状态。
      *
      * @param mainCommandId    主命令 ID
      * @param expectedChildren 期望的子命令数量
-     * @param dbName           主命令所在数据源(用于写指令表和结果表)
+     * @param dbName           主命令所在数据源
      */
     public void start(Long mainCommandId, int expectedChildren, String dbName) {
-        Thread t = new Thread(() -> {
-            try {
-                runMonitor(mainCommandId, expectedChildren, dbName);
-            } catch (Throwable th) {
-                log.error("Child command monitor crashed for cmd {}: {}", mainCommandId, th.getMessage(), th);
-            }
-        }, "fmsy-child-monitor-" + mainCommandId);
-        t.setDaemon(false);
-        t.start();
-    }
-
-    /**
-     * 实际轮询逻辑(在后台线程中执行)。
-     * <p>使用 {@link SystemConstants#MONITOR_INTERVAL_MS} 固定间隔,
-     * {@link SystemConstants#MONITOR_MAX_ITERATIONS} 限制最大轮询次数,
-     * 超时后强制更新主命令为 ERROR,防止永久卡在 PROCESSING。
-     */
-    private void runMonitor(Long mainCommandId, int expectedChildren, String dbName) {
         LogUtils.setTaskId(mainCommandId);
         log.info("Starting monitor for main command: {}, expected children: {}",
                 mainCommandId, expectedChildren);
-        int completed = 0;
 
-        for (int i = 0; i < SystemConstants.MONITOR_MAX_ITERATIONS; i++) {
-            completed = countCompletedChildren(mainCommandId);
-            log.info("Completed children: {}/{}", completed, expectedChildren);
+        AtomicInteger iteration = new AtomicInteger(0);
+        ScheduledFuture<?> future = scheduler.scheduleWithFixedDelay(() -> {
+            int iter = iteration.incrementAndGet();
+            if (iter > SystemConstants.MONITOR_MAX_ITERATIONS) {
+                log.error("Monitor timeout for main command: {}, reached max iterations",
+                        mainCommandId);
+                updateMainCommandStatusOnTimeout(mainCommandId, dbName);
+                throw new RuntimeException("Monitor timeout for cmd " + mainCommandId);
+            }
+
+            int completed = countCompletedChildren(mainCommandId);
+            log.info("Completed children: {}/{} (iteration {})",
+                    completed, expectedChildren, iter);
 
             if (completed >= expectedChildren) {
                 log.info("All children completed for main command: {}", mainCommandId);
                 updateMainCommandStatus(mainCommandId, dbName);
-                return;
+                throw new RuntimeException("Monitor completed for cmd " + mainCommandId);
             }
+        }, 0, SystemConstants.MONITOR_INTERVAL_MS, TimeUnit.MILLISECONDS);
 
+        // 异常终止时自动取消调度(正常/超时都会抛 RuntimeException 触发)
+        Thread monitorThread = new Thread(() -> {
             try {
-                Thread.sleep(SystemConstants.MONITOR_INTERVAL_MS);
+                future.get();
+            } catch (java.util.concurrent.CancellationException e) {
+                log.debug("Monitor cancelled for cmd {}", mainCommandId);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                break;
+                log.warn("Monitor interrupted for cmd {}", mainCommandId);
+                future.cancel(false);
+            } catch (java.util.concurrent.ExecutionException e) {
+                log.debug("Monitor completed for cmd {}: {}", mainCommandId, e.getCause().getMessage());
             }
-        }
-
-        log.error("Monitor timeout for main command: {}, completed: {}/{}", mainCommandId, completed, expectedChildren);
-        updateMainCommandStatusOnTimeout(mainCommandId, dbName);
+        }, "fmsy-child-monitor-" + mainCommandId);
+        monitorThread.setDaemon(false);
+        monitorThread.start();
     }
 
     /** 统计已完成的子命令数量 */

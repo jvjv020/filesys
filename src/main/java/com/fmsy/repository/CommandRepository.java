@@ -180,7 +180,7 @@ public class CommandRepository {
             cmd.setCategoryCode(rs.getString(ColumnNames.CATEGORY_CODE));
             cmd.setControlCode(rs.getString(ColumnNames.CONTROL_CODE));
             String type = rs.getString(ColumnNames.COMMAND_TYPE);
-            cmd.setCommandType(type == null ? null : CommandType.valueOf(type));
+            cmd.setCommandType(CommandType.fromCode(type));
             cmd.setAuditCount(rs.getInt(ColumnNames.AUDIT_COUNT));
             cmd.setExtraInfo(rs.getString(ColumnNames.EXTRA_INFO));
             cmd.setTempConfig(rs.getString(ColumnNames.TEMP_CONFIG));
