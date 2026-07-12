@@ -138,9 +138,15 @@ public class FlagFileService {
         if ("?".equals(mode)) {
             return checkReady(client, flagPattern);
         }
-        // 读标志文件内容作为期望值
+        // 先检查标志文件是否存在，不存在则跳过（N）
+        if (!checkReady(client, flagPattern)) {
+            return false;
+        }
+        // 文件存在，读内容作为期望值；空内容应视为校验失败（E）
         String expect = readFlagContent(client, flagPattern);
-        if (expect == null) return false;
+        if (expect == null) {
+            throw new FlagCheckException("FLAG file is empty: " + flagPattern);
+        }
         return checkFlagCompare(client, flagPattern, expect, mode, dataFile);
     }
 
@@ -186,7 +192,10 @@ public class FlagFileService {
 
         // 计算实际值
         String actual = computeMetric(client, metricStr, dataFile);
-        if (actual == null) return false;
+        if (actual == null) {
+            throw new FlagCheckException("FLAG check failed: unable to compute metric '" + metricStr
+                    + "' for " + dataFile);
+        }
 
         // 执行比对
         boolean pass = compareValues(expect, actual, comparison);

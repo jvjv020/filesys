@@ -1,19 +1,11 @@
 package com.fmsy.transfer.upload;
 
-import com.fmsy.converter.CloseableIterator;
-import com.fmsy.converter.ConverterFactory;
-import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.CommandType;
-import com.fmsy.enums.EmptyDataHandling;
-import com.fmsy.exception.TransferException;
 import com.fmsy.ftp.FtpClient;
-import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.Command;
-import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.DetailRepository;
-import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
@@ -22,13 +14,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
-import java.io.InputStream;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -47,25 +37,13 @@ class MultiUploadHandlerTest {
     private DetailRepository detailRepository;
 
     @Mock
-    private FieldMappingBuilder fieldMappingBuilder;
-
-    @Mock
     private UploadSupport uploadSupport;
 
     @Mock
     private TransferSupport transferSupport;
 
     @Mock
-    private FtpPool ftpPool;
-
-    @Mock
-    private ConverterFactory converterFactory;
-
-    @Mock
     private FtpClient ftpClient;
-
-    @Mock
-    private FileConverter fileConverter;
 
     private IntFunction<ExecutorService> batchExecutorFactory;
     private MultiUploadHandler handler;
@@ -77,9 +55,8 @@ class MultiUploadHandlerTest {
     @BeforeEach
     void setUp() {
         batchExecutorFactory = size -> Executors.newFixedThreadPool(size);
-        handler = new MultiUploadHandler(detailRepository, fieldMappingBuilder,
-                uploadSupport, transferSupport, ftpPool,
-                batchExecutorFactory, converterFactory);
+        handler = new MultiUploadHandler(detailRepository, uploadSupport, transferSupport,
+                batchExecutorFactory);
 
         command = new Command();
         command.setId(1L);
@@ -101,19 +78,12 @@ class MultiUploadHandlerTest {
     class HandleBatchMode {
 
         @BeforeEach
-        void setupBatchModeChain() throws Exception {
+        void setupBatchModeChain() {
             command.setCommandType(CommandType.BATCH);
-
-            when(transferSupport.executeWithClient(eq("ftp1"), any()))
-                    .thenAnswer(invocation -> {
-                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
-                        return cb.run(ftpClient);
-                    });
-            when(transferSupport.preCheck(ftpClient, config, null)).thenReturn(true);
         }
 
         @Test
-        @DisplayName("should handle batch with details")
+        @DisplayName("should handle batch with details using processSingleFile")
         void shouldHandleBatchWithDetails() throws Exception {
             Map<String, Object> detail1 = new HashMap<>();
             detail1.put(ColumnNames.DETAIL_ID, 100L);
@@ -131,24 +101,41 @@ class MultiUploadHandlerTest {
                     .thenReturn(Arrays.asList(detail1, detail2));
 
             ResolvedPath fileInfo = ResolvedPath.of("/data/files/file1.csv");
-            when(transferSupport.buildContext(any(), any(), any())).thenReturn(Map.of());
             when(transferSupport.resolveFilePath(anyString(), any(Map.class))).thenReturn(fileInfo);
 
-            when(converterFactory.get("CSV")).thenReturn(fileConverter);
-            when(uploadSupport.preAudit(any(), any(), anyString(), any())).thenReturn(100);
-
-            when(ftpClient.getInputStream(anyString())).thenReturn(mock(InputStream.class));
-            FieldMapping mapping = new FieldMapping();
-            mapping.setTableFields(Collections.singletonList("col1"));
-            when(fieldMappingBuilder.buildForUpload(any(), any())).thenReturn(mapping);
-            when(fileConverter.parse(any(InputStream.class), any())).thenReturn(Collections.emptyIterator());
-
-            when(uploadSupport.insertBatchInTx(any(), any(), any(), anyBoolean())).thenReturn(100);
+            // processSingleFile returns success for both files
+            when(uploadSupport.processSingleFile(anyString(), any(), any(), anyString(), any()))
+                    .thenReturn(new UploadSupport.UploadResult(100, 1, 0, 0, null));
 
             handler.handle(command, config, result);
 
             assertNotNull(result.getResult());
-            verify(detailRepository, atLeastOnce()).findUploadDetails(1L, ColumnNames.STATUS_EMPTY);
+            assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
+            verify(uploadSupport, times(2)).processSingleFile(anyString(), any(), any(), anyString(), any());
+        }
+
+        @Test
+        @DisplayName("should mark detail error when processSingleFile returns error")
+        void shouldMarkDetailErrorOnProcessSingleFileError() throws Exception {
+            Map<String, Object> detail = new HashMap<>();
+            detail.put(ColumnNames.DETAIL_ID, 400L);
+            detail.put(ColumnNames.FILE_NAME, "file3.csv");
+            detail.put(ColumnNames.FIELD_NAME, "REGION");
+            detail.put(ColumnNames.FIELD_VALUE, "EAST");
+
+            when(detailRepository.findUploadDetails(1L, ColumnNames.STATUS_EMPTY))
+                    .thenReturn(Collections.singletonList(detail));
+
+            ResolvedPath fileInfo = ResolvedPath.of("/data/files/file3.csv");
+            when(transferSupport.resolveFilePath(anyString(), any(Map.class))).thenReturn(fileInfo);
+
+            when(uploadSupport.processSingleFile(anyString(), any(), any(), anyString(), any()))
+                    .thenReturn(new UploadSupport.UploadResult(0, 0, 0, 1, ColumnNames.STATUS_ERROR));
+
+            handler.handle(command, config, result);
+
+            verify(detailRepository).updateStatus(400L, ColumnNames.STATUS_ERROR, null);
+            assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
         }
 
         @Test
@@ -163,51 +150,9 @@ class MultiUploadHandlerTest {
             when(detailRepository.findUploadDetails(1L, ColumnNames.STATUS_EMPTY))
                     .thenReturn(Collections.singletonList(detail));
 
-            when(converterFactory.get("CSV")).thenReturn(fileConverter);
-
             handler.handle(command, config, result);
 
             verify(detailRepository).updateStatus(200L, ColumnNames.STATUS_SKIPPED, null);
-        }
-
-        @Test
-        @DisplayName("should mark error on pre-audit failure in batch")
-        void shouldMarkErrorOnPreAuditFailure() throws Exception {
-            Map<String, Object> detail = new HashMap<>();
-            detail.put(ColumnNames.DETAIL_ID, 300L);
-            detail.put(ColumnNames.FILE_NAME, "badfile.csv");
-            detail.put(ColumnNames.FIELD_NAME, "REGION");
-            detail.put(ColumnNames.FIELD_VALUE, "EAST");
-
-            when(detailRepository.findUploadDetails(1L, ColumnNames.STATUS_EMPTY))
-                    .thenReturn(Collections.singletonList(detail));
-
-            ResolvedPath fileInfo = ResolvedPath.of("/data/files/badfile.csv");
-            when(transferSupport.buildContext(any(), any(), any())).thenReturn(Map.of());
-            when(transferSupport.resolveFilePath(anyString(), any(Map.class))).thenReturn(fileInfo);
-
-            when(converterFactory.get("CSV")).thenReturn(fileConverter);
-            when(uploadSupport.preAudit(any(), any(), anyString(), any())).thenReturn(-1);
-
-            handler.handle(command, config, result);
-
-            verify(detailRepository).updateStatus(300L, ColumnNames.STATUS_ERROR, null);
-        }
-
-        @Test
-        @DisplayName("should pre-check failure return skipped")
-        void shouldReturnSkippedOnPreCheckFailure() throws Exception {
-            when(transferSupport.executeWithClient(eq("ftp1"), any()))
-                    .thenAnswer(invocation -> {
-                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
-                        return cb.run(ftpClient);
-                    });
-            when(transferSupport.preCheck(ftpClient, config, null)).thenReturn(false);
-
-            handler.handle(command, config, result);
-
-            assertEquals(ColumnNames.STATUS_SKIPPED, result.getResult());
-            verify(detailRepository, never()).findUploadDetails(anyLong(), anyString());
         }
     }
 
@@ -221,36 +166,58 @@ class MultiUploadHandlerTest {
 
             ResolvedPath dirInfo = ResolvedPath.of("/data/files/");
             when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(dirInfo);
-
+            // 所有 executeWithClient 调用都传递 ftpClient mock
             when(transferSupport.executeWithClient(eq("ftp1"), any()))
                     .thenAnswer(invocation -> {
                         TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
                         return cb.run(ftpClient);
                     });
-            when(transferSupport.preCheck(ftpClient, config, dirInfo)).thenReturn(true);
-            when(ftpClient.listFiles(anyString())).thenReturn(new String[]{"/data/files/file1.csv"});
-
-            when(converterFactory.get("CSV")).thenReturn(fileConverter);
         }
 
         @Test
-        @DisplayName("should handle serial mode with directory listing")
+        @DisplayName("should handle serial mode with directory listing and pre-scan")
         void shouldHandleSerialMode() throws Exception {
+            // No FLAG preOps → prescan passes all files
             when(ftpClient.listFiles(anyString())).thenReturn(new String[]{"/data/files/file1.csv"});
-            when(ftpPool.getClient("ftp1")).thenReturn(ftpClient);
-            when(transferSupport.preCheck(any(), any(), any())).thenReturn(true);
-            when(uploadSupport.preAudit(any(), any(), anyString(), any())).thenReturn(100);
-            when(ftpClient.getInputStream(anyString())).thenReturn(mock(InputStream.class));
-
-            FieldMapping mapping = new FieldMapping();
-            mapping.setTableFields(Collections.singletonList("col1"));
-            when(fieldMappingBuilder.buildForUpload(eq(config), isNull())).thenReturn(mapping);
-            when(fileConverter.parse(any(InputStream.class), any())).thenReturn(Collections.emptyIterator());
-            when(uploadSupport.insertBatchInTx(any(), any(), any())).thenReturn(100);
+            when(uploadSupport.processSingleFile(anyString(), any(), any(), anyString(), any()))
+                    .thenReturn(new UploadSupport.UploadResult(100, 1, 0, 0, null));
 
             handler.handle(command, config, result);
 
+            assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
+            assertEquals(100, result.getRecordCount());
+        }
+
+        @Test
+        @DisplayName("should prescan and filter flag files")
+        void shouldPrescanAndFilterFlagFiles() throws Exception {
+            config.setPreOperations("FLAG:{stem}.OK");
+            // Mock listFiles to return data files AND flag files
+            String[] allFiles = {"/data/files/data1.csv", "/data/files/data1.OK",
+                    "/data/files/data2.csv", "/data/files/data2.OK"};
+            when(ftpClient.listFiles(anyString())).thenReturn(allFiles);
+
+            // processSingleFile returns success only for data files
+            when(uploadSupport.processSingleFile(eq("ftp1"), any(), any(), contains(".csv"), any()))
+                    .thenReturn(new UploadSupport.UploadResult(100, 1, 0, 0, null));
+
+            handler.handle(command, config, result);
+
+            // Only 2 data files processed, flag files filtered
+            verify(uploadSupport, times(2)).processSingleFile(anyString(), any(), any(), anyString(), any());
             assertNotNull(result.getResult());
+        }
+
+        @Test
+        @DisplayName("should count processSingleFile error as FAIL in serial mode")
+        void shouldCountErrorAsFail() throws Exception {
+            when(ftpClient.listFiles(anyString())).thenReturn(new String[]{"/data/files/file1.csv"});
+            when(uploadSupport.processSingleFile(anyString(), any(), any(), anyString(), any()))
+                    .thenReturn(new UploadSupport.UploadResult(0, 0, 0, 1, ColumnNames.STATUS_ERROR));
+
+            handler.handle(command, config, result);
+
+            assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
         }
 
         @Test
@@ -259,18 +226,149 @@ class MultiUploadHandlerTest {
             when(ftpClient.listFiles(anyString())).thenReturn(new String[0]);
 
             handler.handle(command, config, result);
-
             assertNotNull(result.getResult());
         }
 
         @Test
-        @DisplayName("should return skipped when preCheck fails in listFiles")
-        void shouldReturnSkippedWhenPreCheckFailsInListFiles() throws Exception {
-            when(transferSupport.preCheck(eq(ftpClient), eq(config), any())).thenReturn(false);
+        @DisplayName("should return skipped when preCheck returns false (flag not found)")
+        void shouldReturnSkippedWhenFlagNotFound() throws Exception {
+            when(ftpClient.listFiles(anyString())).thenReturn(new String[]{"/data/files/file1.csv"});
+            when(uploadSupport.processSingleFile(anyString(), any(), any(), anyString(), any()))
+                    .thenReturn(new UploadSupport.UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED));
+
+            handler.handle(command, config, result);
+
+            assertNotNull(result.getResult());
+            assertNotEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
+        }
+
+        @Test
+        @DisplayName("should handle all files filtered out by pre-scan")
+        void shouldHandleAllFilesFilteredByPrescan() throws Exception {
+            config.setPreOperations("FLAG:{stem}.OK");
+            // Only flag files returned (no corresponding data files)
+            String[] allFiles = {"/data/files/data1.OK", "/data/files/data2.OK"};
+            when(ftpClient.listFiles(anyString())).thenReturn(allFiles);
 
             handler.handle(command, config, result);
 
             assertEquals(ColumnNames.STATUS_SKIPPED, result.getResult());
+            verify(uploadSupport, never()).processSingleFile(anyString(), any(), any(), anyString(), any());
+        }
+    }
+
+    @Nested
+    @DisplayName("prescanDataFiles")
+    class PrescanDataFilesTests {
+
+        @Test
+        @DisplayName("should return all files when flagPattern is null")
+        void shouldReturnAllWhenNoFlagPattern() {
+            String[] files = {"file1.csv", "file2.csv"};
+            List<String> result = handler.prescanDataFiles(files, null);
+            assertEquals(2, result.size());
+        }
+
+        @Test
+        @DisplayName("should filter out known flag files and include data files with flags")
+        void shouldFilterFlagFiles() {
+            String[] files = {"data1.csv", "data1.OK", "data2.csv", "data2.OK"};
+            List<String> result = handler.prescanDataFiles(files, "{stem}.OK");
+            assertEquals(2, result.size());
+            assertTrue(result.contains("data1.csv"));
+            assertTrue(result.contains("data2.csv"));
+        }
+
+        @Test
+        @DisplayName("should warn and exclude data files without flags")
+        void shouldExcludeDataFilesWithoutFlags() {
+            String[] files = {"data1.csv", "data1.OK", "orphan.csv"};
+            List<String> result = handler.prescanDataFiles(files, "{stem}.OK");
+            assertEquals(1, result.size());
+            assertTrue(result.contains("data1.csv"));
+        }
+
+        @Test
+        @DisplayName("should handle empty file list")
+        void shouldHandleEmptyList() {
+            List<String> result = handler.prescanDataFiles(new String[0], "{stem}.OK");
+            assertTrue(result.isEmpty());
+        }
+
+        @Test
+        @DisplayName("should handle null file list")
+        void shouldHandleNullList() {
+            List<String> result = handler.prescanDataFiles(null, "{stem}.OK");
+            assertTrue(result.isEmpty());
+        }
+    }
+
+    @Nested
+    @DisplayName("extractFlagPathPattern")
+    class ExtractFlagPathPatternTests {
+
+        @Test
+        @DisplayName("should extract simple FLAG pattern")
+        void shouldExtractSimpleFlag() {
+            assertEquals("{stem}.OK", MultiUploadHandler.extractFlagPathPattern("FLAG:{stem}.OK"));
+        }
+
+        @Test
+        @DisplayName("should extract FLAG pattern with mode")
+        void shouldExtractFlagWithMode() {
+            assertEquals("{stem}.OK", MultiUploadHandler.extractFlagPathPattern("FLAG:{stem}.OK;L"));
+        }
+
+        @Test
+        @DisplayName("should extract first FLAG from multiple ops")
+        void shouldExtractFirstFlagFromMultiple() {
+            String ops = "FLAG:{stem}.OK,READY:other.txt";
+            assertEquals("{stem}.OK", MultiUploadHandler.extractFlagPathPattern(ops));
+        }
+
+        @Test
+        @DisplayName("should return null when no FLAG or READY")
+        void shouldReturnNullWhenNoFlag() {
+            assertNotNull(MultiUploadHandler.extractFlagPathPattern("READY:check.txt"));
+            assertEquals("check.txt", MultiUploadHandler.extractFlagPathPattern("READY:check.txt"));
+            assertNull(MultiUploadHandler.extractFlagPathPattern(""));
+            assertNull(MultiUploadHandler.extractFlagPathPattern(null));
+        }
+    }
+
+    @Nested
+    @DisplayName("resolveFlagName")
+    class ResolveFlagNameTests {
+
+        @Test
+        @DisplayName("should resolve {stem} pattern")
+        void shouldResolveStemPattern() {
+            ResolvedPath info = ResolvedPath.of("/data/file.csv");
+            String result = MultiUploadHandler.resolveFlagName("{stem}.OK", info);
+            assertEquals("/data/file.OK", result);
+        }
+
+        @Test
+        @DisplayName("should resolve {name} pattern")
+        void shouldResolveNamePattern() {
+            ResolvedPath info = ResolvedPath.of("/data/file.csv");
+            String result = MultiUploadHandler.resolveFlagName("{name}.flag", info);
+            assertEquals("/data/file.csv.flag", result);
+        }
+
+        @Test
+        @DisplayName("should handle relative path without dir")
+        void shouldHandleRelativePath() {
+            ResolvedPath info = ResolvedPath.of("file.csv");
+            String result = MultiUploadHandler.resolveFlagName("{stem}.OK", info);
+            assertEquals("file.OK", result);
+        }
+
+        @Test
+        @DisplayName("should return null for null inputs")
+        void shouldReturnNullForNull() {
+            assertNull(MultiUploadHandler.resolveFlagName(null, ResolvedPath.of("f.csv")));
+            assertNull(MultiUploadHandler.resolveFlagName("{stem}.OK", null));
         }
     }
 }

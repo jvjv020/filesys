@@ -2,17 +2,20 @@ package com.fmsy.transfer.upload;
 
 import com.fmsy.config.DataSourceConfig;
 import com.fmsy.converter.CloseableIterator;
+import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.EmptyDataHandling;
+import com.fmsy.exception.FlagCheckException;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.ftp.FtpPool;
 import com.fmsy.ftp.FtpPool.FtpCallback;
 import com.fmsy.model.FieldMapping;
-import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.TargetTableRepository;
+import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.ColumnNames;
+import com.fmsy.util.ResolvedPath;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -25,6 +28,7 @@ import org.springframework.transaction.TransactionStatus;
 
 import java.io.InputStream;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -53,6 +57,12 @@ class UploadSupportTest {
     private FileConverter fileConverter;
 
     @Mock
+    private ConverterFactory converterFactory;
+
+    @Mock
+    private FieldMappingBuilder fieldMappingBuilder;
+
+    @Mock
     private TransactionTemplate transactionTemplate;
 
     @Mock
@@ -62,7 +72,7 @@ class UploadSupportTest {
 
     @BeforeEach
     void setUp() {
-        uploadSupport = new UploadSupport(ftpPool, targetTableRepository, dbPool, transferSupport);
+        uploadSupport = new UploadSupport(ftpPool, targetTableRepository, dbPool, transferSupport, converterFactory, fieldMappingBuilder);
     }
 
     @Nested
@@ -193,128 +203,8 @@ class UploadSupportTest {
     }
 
     @Nested
-    @DisplayName("insertBatchInTx")
-    class InsertBatchInTxTests {
-
-        @Test
-        @DisplayName("should insert records in transaction")
-        void shouldInsertRecordsInTransaction() {
-            when(dbPool.getTransactionTemplate(anyString())).thenReturn(transactionTemplate);
-            when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
-                var callback = invocation.getArgument(0,
-                        org.springframework.transaction.support.TransactionCallback.class);
-                return callback.doInTransaction(transactionStatus);
-            });
-            when(transferSupport.handleEmptyData(anyInt(), any())).thenReturn(true);
-
-            TransferConfig config = new TransferConfig();
-            config.setDbName("DB1");
-            config.setTableName("mytable");
-
-            FieldMapping mapping = new FieldMapping();
-            mapping.setTableFields(Arrays.asList("col1", "col2"));
-
-            Map<String, Object> record1 = new HashMap<>();
-            record1.put("col1", "val1");
-            record1.put("col2", "val2");
-            Map<String, Object> record2 = new HashMap<>();
-            record2.put("col1", "val3");
-            record2.put("col2", "val4");
-
-            List<List<Map<String, Object>>> batches = new ArrayList<>();
-            batches.add(Arrays.asList(record1, record2));
-            Iterator<List<Map<String, Object>>> dataIter = batches.iterator();
-
-            int count = uploadSupport.insertBatchInTx(config, dataIter, mapping);
-
-            verify(targetTableRepository, atLeastOnce()).batchInsert(
-                    eq("DB1"), eq("mytable"), anyList(), anyList());
-        }
-
-        @Test
-        @DisplayName("should truncate first when truncateFirst is true")
-        void shouldTruncateFirstWhenFlagIsSet() {
-            when(dbPool.getTransactionTemplate(anyString())).thenReturn(transactionTemplate);
-            when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
-                var callback = invocation.getArgument(0,
-                        org.springframework.transaction.support.TransactionCallback.class);
-                return callback.doInTransaction(transactionStatus);
-            });
-            when(transferSupport.handleEmptyData(anyInt(), any())).thenReturn(true);
-
-            TransferConfig config = new TransferConfig();
-            config.setDbName("DB1");
-            config.setTableName("mytable");
-
-            FieldMapping mapping = new FieldMapping();
-            mapping.setTableFields(Collections.singletonList("col1"));
-
-            Map<String, Object> record = new HashMap<>();
-            record.put("col1", "val1");
-
-            List<List<Map<String, Object>>> batches = new ArrayList<>();
-            batches.add(Collections.singletonList(record));
-            Iterator<List<Map<String, Object>>> dataIter = batches.iterator();
-
-            uploadSupport.insertBatchInTx(config, dataIter, mapping, true);
-
-            verify(targetTableRepository).truncate("DB1", "mytable");
-        }
-
-        @Test
-        @DisplayName("should throw when handleEmptyData returns false")
-        void shouldThrowWhenHandleEmptyDataReturnsFalse() {
-            when(dbPool.getTransactionTemplate(anyString())).thenReturn(transactionTemplate);
-            when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
-                var callback = invocation.getArgument(0,
-                        org.springframework.transaction.support.TransactionCallback.class);
-                return callback.doInTransaction(transactionStatus);
-            });
-            when(transferSupport.handleEmptyData(anyInt(), any())).thenReturn(false);
-
-            TransferConfig config = new TransferConfig();
-            config.setDbName("DB1");
-            config.setTableName("mytable");
-            config.setEmptyDataHandling(com.fmsy.enums.EmptyDataHandling.ERROR);
-
-            FieldMapping mapping = new FieldMapping();
-            mapping.setTableFields(Collections.singletonList("col1"));
-
-            Iterator<List<Map<String, Object>>> dataIter = Collections.emptyIterator();
-
-            assertThrows(RuntimeException.class,
-                    () -> uploadSupport.insertBatchInTx(config, dataIter, mapping));
-        }
-
-        @Test
-        @DisplayName("should handle empty data iterator gracefully")
-        void shouldHandleEmptyDataIterator() {
-            when(dbPool.getTransactionTemplate(anyString())).thenReturn(transactionTemplate);
-            when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
-                var callback = invocation.getArgument(0,
-                        org.springframework.transaction.support.TransactionCallback.class);
-                return callback.doInTransaction(transactionStatus);
-            });
-            when(transferSupport.handleEmptyData(eq(0), any())).thenReturn(true);
-
-            TransferConfig config = new TransferConfig();
-            config.setDbName("DB1");
-            config.setTableName("mytable");
-
-            FieldMapping mapping = new FieldMapping();
-            mapping.setTableFields(Collections.singletonList("col1"));
-
-            Iterator<List<Map<String, Object>>> emptyIter = Collections.emptyIterator();
-
-            int count = uploadSupport.insertBatchInTx(config, emptyIter, mapping);
-            assertEquals(0, count);
-            verifyNoInteractions(targetTableRepository);
-        }
-    }
-
-    @Nested
-    @DisplayName("insertAndVerifyInTx")
-    class InsertAndVerifyInTxTests {
+    @DisplayName("insertAndVerifyPerFileInTx")
+    class InsertAndVerifyPerFileInTxTests {
 
         @Test
         @DisplayName("should insert records and verify in transaction")
@@ -332,8 +222,6 @@ class UploadSupportTest {
             config.setTableName("mytable");
             config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
 
-            Result result = new Result();
-
             FieldMapping mapping = new FieldMapping();
             mapping.setTableFields(Arrays.asList("col1", "col2"));
 
@@ -345,7 +233,7 @@ class UploadSupportTest {
             CloseableIterator<List<Map<String, Object>>> dataIter =
                     new CloseableIterator<>(batches.iterator());
 
-            int count = uploadSupport.insertAndVerifyInTx(config, dataIter, mapping, false, result);
+            int count = uploadSupport.insertAndVerifyPerFileInTx(config, dataIter, mapping, false);
 
             // Expect 1 record inserted successfully
             assertEquals(1, count);
@@ -369,15 +257,13 @@ class UploadSupportTest {
             config.setTableName("mytable");
             config.setEmptyDataHandling(EmptyDataHandling.ERROR);
 
-            Result result = new Result();
-
             FieldMapping mapping = new FieldMapping();
             mapping.setTableFields(Collections.singletonList("col1"));
 
             CloseableIterator<List<Map<String, Object>>> emptyIter =
                     new CloseableIterator<>(Collections.emptyIterator());
 
-            int count = uploadSupport.insertAndVerifyInTx(config, emptyIter, mapping, false, result);
+            int count = uploadSupport.insertAndVerifyPerFileInTx(config, emptyIter, mapping, false);
 
             assertEquals(0, count);
         }
@@ -398,15 +284,13 @@ class UploadSupportTest {
             config.setTableName("mytable");
             config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
 
-            Result result = new Result();
-
             FieldMapping mapping = new FieldMapping();
             mapping.setTableFields(Collections.singletonList("col1"));
 
             CloseableIterator<List<Map<String, Object>>> emptyIter =
                     new CloseableIterator<>(Collections.emptyIterator());
 
-            int count = uploadSupport.insertAndVerifyInTx(config, emptyIter, mapping, false, result);
+            int count = uploadSupport.insertAndVerifyPerFileInTx(config, emptyIter, mapping, false);
 
             assertEquals(0, count);
         }
@@ -427,12 +311,9 @@ class UploadSupportTest {
             config.setTableName("mytable");
             config.setEmptyDataHandling(EmptyDataHandling.ERROR);
 
-            Result result = new Result();
-
             FieldMapping mapping = new FieldMapping();
             mapping.setTableFields(Collections.singletonList("col1"));
 
-            // Spy on uploadSupport to mock postAudit to return false
             UploadSupport spySupport = spy(uploadSupport);
             doReturn(false).when(spySupport).postAudit(any(), anyInt(), anyInt());
 
@@ -444,12 +325,12 @@ class UploadSupportTest {
                     new CloseableIterator<>(batches.iterator());
 
             assertThrows(RuntimeException.class,
-                    () -> spySupport.insertAndVerifyInTx(config, dataIter, mapping, false, result));
+                    () -> spySupport.insertAndVerifyPerFileInTx(config, dataIter, mapping, false));
         }
 
         @Test
-        @DisplayName("should keep data and set ERROR result in non-ERROR mode post-audit failure")
-        void shouldKeepDataAndSetErrorOnNonErrorPostAuditFailure() {
+        @DisplayName("should return -1 on non-ERROR mode post-audit failure")
+        void shouldReturnMinusOneOnNonErrorPostAuditFailure() {
             when(dbPool.getTransactionTemplate(anyString())).thenReturn(transactionTemplate);
             when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
                 var callback = invocation.getArgument(0,
@@ -463,12 +344,9 @@ class UploadSupportTest {
             config.setTableName("mytable");
             config.setEmptyDataHandling(EmptyDataHandling.ALLOW); // non-ERROR
 
-            Result result = new Result();
-
             FieldMapping mapping = new FieldMapping();
             mapping.setTableFields(Collections.singletonList("col1"));
 
-            // Spy on uploadSupport to mock postAudit to return false
             UploadSupport spySupport = spy(uploadSupport);
             doReturn(false).when(spySupport).postAudit(any(), anyInt(), anyInt());
 
@@ -479,17 +357,15 @@ class UploadSupportTest {
             CloseableIterator<List<Map<String, Object>>> dataIter =
                     new CloseableIterator<>(batches.iterator());
 
-            int count = spySupport.insertAndVerifyInTx(config, dataIter, mapping, false, result);
+            int count = spySupport.insertAndVerifyPerFileInTx(config, dataIter, mapping, false);
 
-            // Data committed (returned count), result marked ERROR with description
-            assertEquals(1, count);
-            assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
-            assertTrue(result.getDescription().contains("Post-audit failed"));
+            // Data committed (data kept), but returns -1 to signal audit failure
+            assertEquals(-1, count);
         }
 
         @Test
         @DisplayName("should truncate first when truncateFirst is true")
-        void shouldTruncateFirstInInsertAndVerify() {
+        void shouldTruncateFirst() {
             when(dbPool.getTransactionTemplate(anyString())).thenReturn(transactionTemplate);
             when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
                 var callback = invocation.getArgument(0,
@@ -503,8 +379,6 @@ class UploadSupportTest {
             config.setTableName("mytable");
             config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
 
-            Result result = new Result();
-
             FieldMapping mapping = new FieldMapping();
             mapping.setTableFields(Collections.singletonList("col1"));
 
@@ -515,7 +389,7 @@ class UploadSupportTest {
             CloseableIterator<List<Map<String, Object>>> dataIter =
                     new CloseableIterator<>(batches.iterator());
 
-            int count = uploadSupport.insertAndVerifyInTx(config, dataIter, mapping, true, result);
+            int count = uploadSupport.insertAndVerifyPerFileInTx(config, dataIter, mapping, true);
 
             assertEquals(1, count);
             verify(targetTableRepository).truncate("DB1", "mytable");
@@ -539,31 +413,24 @@ class UploadSupportTest {
             config.setTableName("mytable");
             config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
 
-            Result result = new Result();
-
             FieldMapping mapping = new FieldMapping();
             mapping.setTableFields(Collections.singletonList("col1"));
 
-            // Generate 2500 records → should exceed DEFAULT_BATCH_SIZE (1000)
-            // and produce 3 batch inserts (1000 + 1000 + 500)
+            // Generate 2500 individual records in 2500 chunks (each chunk = 1 record)
+            // so CloseableIterator.getRecordCount() matches totalRecords for post-audit
             List<List<Map<String, Object>>> allBatches = new ArrayList<>();
-            for (int batchIdx = 0; batchIdx < 3; batchIdx++) {
-                List<Map<String, Object>> chunk = new ArrayList<>();
-                int chunkSize = batchIdx < 2 ? 1000 : 500;
-                for (int i = 0; i < chunkSize; i++) {
-                    Map<String, Object> record = new HashMap<>();
-                    record.put("col1", "val_" + batchIdx + "_" + i);
-                    chunk.add(record);
-                }
-                allBatches.add(chunk);
+            for (int i = 0; i < 2500; i++) {
+                Map<String, Object> record = new HashMap<>();
+                record.put("col1", "val_" + i);
+                allBatches.add(Collections.singletonList(record));
             }
             CloseableIterator<List<Map<String, Object>>> dataIter =
                     new CloseableIterator<>(allBatches.iterator());
 
-            int count = uploadSupport.insertAndVerifyInTx(config, dataIter, mapping, false, result);
+            int count = uploadSupport.insertAndVerifyPerFileInTx(config, dataIter, mapping, false);
 
             assertEquals(2500, count);
-            // Verify at least 3 batchInsert calls (exact count depends on batching)
+            // Should produce 3 batchInsert calls (1000 + 1000 + 500)
             verify(targetTableRepository, atLeast(3)).batchInsert(
                     eq("DB1"), eq("mytable"), anyList(), anyList());
         }
@@ -600,21 +467,21 @@ class UploadSupportTest {
         @Test
         @DisplayName("should return SUCCESS when all succeed")
         void shouldReturnSuccessWhenAllSucceed() {
-            var result = new UploadSupport.UploadResult(100, 1, 0, 0);
+            var result = new UploadSupport.UploadResult(100, 1, 0, 0, null);
             assertEquals(ColumnNames.STATUS_SUCCESS, UploadSupport.determineMainStatus(result));
         }
 
         @Test
         @DisplayName("should return ERROR when any failed")
         void shouldReturnErrorWhenAnyFailed() {
-            var result = new UploadSupport.UploadResult(50, 0, 0, 2);
+            var result = new UploadSupport.UploadResult(50, 0, 0, 2, ColumnNames.STATUS_ERROR);
             assertEquals(ColumnNames.STATUS_ERROR, UploadSupport.determineMainStatus(result));
         }
 
         @Test
         @DisplayName("should return SKIPPED when all skipped")
         void shouldReturnSkippedWhenAllSkipped() {
-            var result = new UploadSupport.UploadResult(0, 0, 1, 0);
+            var result = new UploadSupport.UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED);
             assertEquals(ColumnNames.STATUS_SKIPPED, UploadSupport.determineMainStatus(result));
         }
     }
@@ -631,6 +498,178 @@ class UploadSupportTest {
             assertEquals(0, result.successCount());
             assertEquals(1, result.skippedCount());
             assertEquals(0, result.failedCount());
+        }
+    }
+
+    @Nested
+    @DisplayName("processSingleFile")
+    class ProcessSingleFileTests {
+
+        @Test
+        @DisplayName("should return success when uploadSingleFile succeeds")
+        void shouldReturnSuccess() throws Exception {
+            when(transferSupport.executeWithClient(eq("ftp1"), any()))
+                    .thenAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(ftpClient);
+                    });
+
+            TransferConfig config = new TransferConfig();
+            config.setFtpName("ftp1");
+
+            UploadSupport spySupport = spy(uploadSupport);
+            doReturn(new UploadSupport.UploadResult(100, 1, 0, 0, null))
+                    .when(spySupport).uploadSingleFile(any(), any(), any(), anyString(), any());
+
+            UploadSupport.UploadResult result = spySupport.processSingleFile(
+                    "ftp1", 100, config, "/data/file.csv", null);
+
+            assertNull(result.status());
+            assertEquals(100, result.records());
+        }
+
+        @Test
+        @DisplayName("should return skipped when uploadSingleFile returns skipped")
+        void shouldReturnSkipped() throws Exception {
+            when(transferSupport.executeWithClient(eq("ftp1"), any()))
+                    .thenAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(ftpClient);
+                    });
+
+            TransferConfig config = new TransferConfig();
+            config.setFtpName("ftp1");
+
+            UploadSupport spySupport = spy(uploadSupport);
+            doReturn(new UploadSupport.UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED))
+                    .when(spySupport).uploadSingleFile(any(), any(), any(), anyString(), any());
+
+            UploadSupport.UploadResult result = spySupport.processSingleFile(
+                    "ftp1", 100, config, "/data/file.csv", null);
+
+            assertEquals(ColumnNames.STATUS_SKIPPED, result.status());
+            verify(ftpClient, never()).moveToErrorDir(anyString());
+        }
+
+        @Test
+        @DisplayName("should catch FlagCheckException and return ERROR with file move")
+        void shouldHandleFlagCheckException() throws Exception {
+            when(transferSupport.executeWithClient(eq("ftp1"), any()))
+                    .thenAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(ftpClient);
+                    });
+            when(ftpClient.exists(anyString())).thenReturn(false);
+            when(ftpClient.moveToErrorDir(anyString())).thenReturn("/error/file.csv");
+
+            TransferConfig config = new TransferConfig();
+            config.setFtpName("ftp1");
+            config.setPreOperations("FLAG:{stem}.OK");
+
+            UploadSupport spySupport = spy(uploadSupport);
+            doThrow(new FlagCheckException("FLAG check failed"))
+                    .when(spySupport).uploadSingleFile(any(), any(), any(), anyString(), any());
+
+            UploadSupport.UploadResult result = spySupport.processSingleFile(
+                    "ftp1", 100, config, "/data/file.csv", null);
+
+            assertEquals(ColumnNames.STATUS_ERROR, result.status());
+            verify(ftpClient, atLeastOnce()).moveToErrorDir(anyString());
+        }
+
+        @Test
+        @DisplayName("should catch RuntimeException and return ERROR with file move")
+        void shouldHandleRuntimeException() throws Exception {
+            when(transferSupport.executeWithClient(eq("ftp1"), any()))
+                    .thenAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(ftpClient);
+                    });
+            when(ftpClient.moveToErrorDir(anyString())).thenReturn("/error/file.csv");
+
+            TransferConfig config = new TransferConfig();
+            config.setFtpName("ftp1");
+
+            UploadSupport spySupport = spy(uploadSupport);
+            doThrow(new RuntimeException("Pre-audit failed"))
+                    .when(spySupport).uploadSingleFile(any(), any(), any(), anyString(), any());
+
+            UploadSupport.UploadResult result = spySupport.processSingleFile(
+                    "ftp1", 100, config, "/data/file.csv", null);
+
+            assertEquals(ColumnNames.STATUS_ERROR, result.status());
+            verify(ftpClient, atLeastOnce()).moveToErrorDir(anyString());
+        }
+    }
+
+    @Nested
+    @DisplayName("resolveConfiguredFlagPath")
+    class ResolveConfiguredFlagPathTests {
+
+        @Test
+        @DisplayName("should resolve FLAG with stem pattern")
+        void shouldResolveFlagStemPattern() {
+            ResolvedPath fileInfo = ResolvedPath.of("/data/export/file.csv");
+            String result = UploadSupport.resolveConfiguredFlagPath("FLAG:{stem}.OK", fileInfo);
+            assertEquals("/data/export/file.OK", result);
+        }
+
+        @Test
+        @DisplayName("should resolve FLAG with mode suffix")
+        void shouldResolveFlagWithMode() {
+            ResolvedPath fileInfo = ResolvedPath.of("/data/file.csv");
+            String result = UploadSupport.resolveConfiguredFlagPath("FLAG:{stem}.OK;L", fileInfo);
+            assertEquals("/data/file.OK", result);
+        }
+
+        @Test
+        @DisplayName("should resolve READY pattern")
+        void shouldResolveReadyPattern() {
+            ResolvedPath fileInfo = ResolvedPath.of("/data/file.csv");
+            String result = UploadSupport.resolveConfiguredFlagPath("READY:{stem}.ready", fileInfo);
+            assertEquals("/data/file.ready", result);
+        }
+
+        @Test
+        @DisplayName("should return null when no FLAG/READY in ops")
+        void shouldReturnNullWhenNoFlagOrReady() {
+            ResolvedPath fileInfo = ResolvedPath.of("/data/file.csv");
+            assertNull(UploadSupport.resolveConfiguredFlagPath("DEL:old.csv", fileInfo));
+            assertNull(UploadSupport.resolveConfiguredFlagPath("", fileInfo));
+            assertNull(UploadSupport.resolveConfiguredFlagPath(null, fileInfo));
+        }
+
+        @Test
+        @DisplayName("should handle name pattern")
+        void shouldResolveNamePattern() {
+            ResolvedPath fileInfo = ResolvedPath.of("/data/file.csv");
+            String result = UploadSupport.resolveConfiguredFlagPath("FLAG:{name}.flag", fileInfo);
+            assertEquals("/data/file.csv.flag", result);
+        }
+    }
+
+    @Nested
+    @DisplayName("normalizePathSlashes")
+    class NormalizePathSlashesTests {
+
+        @Test
+        @DisplayName("should normalize simple parent references")
+        void shouldNormalizeSimpleParents() {
+            assertEquals("/base/file.OK",
+                    UploadSupport.normalizePathSlashes("/base/sub/../file.OK"));
+        }
+
+        @Test
+        @DisplayName("should return path unchanged when no parent refs")
+        void shouldReturnUnchangedWhenNoParents() {
+            assertEquals("/data/export/file.OK",
+                    UploadSupport.normalizePathSlashes("/data/export/file.OK"));
+        }
+
+        @Test
+        @DisplayName("should handle null")
+        void shouldHandleNull() {
+            assertNull(UploadSupport.normalizePathSlashes(null));
         }
     }
 }

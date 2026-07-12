@@ -31,7 +31,7 @@ import java.util.NoSuchElementException;
  *
  * <p>覆盖来源:
  * <ul>
- *   <li>{@code transfer/upload/UploadSupport.insertBatchInTx} — batchInsert</li>
+ *   <li>{@code transfer/upload/UploadSupport.insertAndVerifyPerFileInTx} — batchInsert + postAudit</li>
  *   <li>{@code transfer/upload/{Single,MultiDirectory,MultiBatch}UploadHandler} — truncate / count(后审计)</li>
  *   <li>{@code transfer/download/{Single,SingleNode,MultiNode}DownloadHandler} — distinct / streamQuery / count</li>
  *   <li>{@code audit/AuditService} — preAuditDbRecords / postAuditCount / countByBucket</li>

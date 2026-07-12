@@ -122,6 +122,20 @@ class FlagFileServiceTest {
             boolean result = flagFileService.preCheck(ftpClient, "FLAG;/data/missing.flg;?", null);
             assertFalse(result);
         }
+
+        @Test
+        @DisplayName("should throw FlagCheckException when FLAG file exists but is empty (E, not N)")
+        void shouldThrowWhenFlagFileIsEmpty() throws Exception {
+            String flagPath = "/data/empty.flg";
+            when(ftpClient.exists(flagPath)).thenReturn(true);
+            when(ftpClient.getInputStream(flagPath)).thenReturn(
+                    new java.io.ByteArrayInputStream(new byte[0]));
+
+            ResolvedPath fileInfo = ResolvedPath.of("/data/file.csv");
+
+            assertThrows(FlagCheckException.class,
+                    () -> flagFileService.preCheck(ftpClient, "FLAG;" + flagPath + ";L", fileInfo));
+        }
     }
 
     @Nested

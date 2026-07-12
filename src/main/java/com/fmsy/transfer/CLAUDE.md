@@ -16,7 +16,7 @@
 | 类 | 角色 |
 |---|------|
 | `TransferSupport` | 跨方向公共方法（resolveFilePath / preCheck / postProcess / handleEmptyData） |
-| `UploadSupport` | 上传特有（preAudit / postAudit / insertBatchInTx） |
+| `UploadSupport` | 上传特有（preAudit / postAudit / insertAndVerifyPerFileInTx / processSingleFile） |
 | `DownloadSupport` | 下载特有（preAudit / postAudit / checkOverwriteAllowed / buildSplitFieldPredicates） |
 
 ### Handler（5 个，均实现 `TransferHandler`）
