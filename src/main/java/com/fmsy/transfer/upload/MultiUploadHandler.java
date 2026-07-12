@@ -129,10 +129,18 @@ public class MultiUploadHandler implements TransferHandler {
 
         // Phase 3: postProcess
         int finalTotalRecords = totalRecords;
-        transferSupport.executeWithClient(ftpName, client -> {
-            transferSupport.postProcess(client, config, dirInfo, finalTotalRecords);
-            return null;
-        });
+        try {
+            transferSupport.executeWithClient(ftpName, client -> {
+                transferSupport.postProcess(client, config, dirInfo, finalTotalRecords);
+                return null;
+            });
+        } catch (Exception e) {
+            log.error("Phase 3 (postProcess) failed for serial upload: {}", e.getMessage(), e);
+            result.setOutcome(totalRecords, ColumnNames.STATUS_ERROR,
+                    "Data uploaded successfully (" + totalRecords + " records) but post-processing failed: "
+                            + e.getMessage());
+            return;
+        }
 
         result.setOutcome(totalRecords,
                 UploadSupport.determineMainStatus(new UploadSupport.UploadResult(
@@ -208,10 +216,18 @@ public class MultiUploadHandler implements TransferHandler {
         // Phase 3 (FTP): postProcess
         ResolvedPath finalLastFileInfo = lastFileInfo;
         int finalTotalRecords = totalRecords;
-        transferSupport.executeWithClient(ftpName, client -> {
-            transferSupport.postProcess(client, config, finalLastFileInfo, finalTotalRecords);
-            return null;
-        });
+        try {
+            transferSupport.executeWithClient(ftpName, client -> {
+                transferSupport.postProcess(client, config, finalLastFileInfo, finalTotalRecords);
+                return null;
+            });
+        } catch (Exception e) {
+            log.error("Phase 3 (postProcess) failed for batch upload: {}", e.getMessage(), e);
+            result.setOutcome(totalRecords, ColumnNames.STATUS_ERROR,
+                    "Data uploaded successfully (" + totalRecords + " records) but post-processing failed: "
+                            + e.getMessage());
+            return;
+        }
 
         result.setOutcome(totalRecords,
                 UploadSupport.determineMainStatus(new UploadSupport.UploadResult(

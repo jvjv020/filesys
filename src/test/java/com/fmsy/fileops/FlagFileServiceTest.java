@@ -1,5 +1,6 @@
 package com.fmsy.fileops;
 
+import com.fmsy.exception.FlagCheckException;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.util.ResolvedPath;
 import org.junit.jupiter.api.BeforeEach;
@@ -97,6 +98,29 @@ class FlagFileServiceTest {
         void shouldLogWarningForUnknownKeyword() {
             boolean result = flagFileService.preCheck(ftpClient, "UNKNOWN;/path", null);
             assertTrue(result);
+        }
+
+        @Test
+        @DisplayName("should throw FlagCheckException when FLAG comparison fails")
+        void shouldThrowFlagCheckExceptionOnComparisonFailure() throws Exception {
+            String flagPath = "/data/flag.flg";
+            when(ftpClient.exists(flagPath)).thenReturn(true);
+            when(ftpClient.getInputStream(flagPath)).thenReturn(
+                    new java.io.ByteArrayInputStream("100".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            when(ftpClient.countFileLines(anyString())).thenReturn(50);
+
+            ResolvedPath fileInfo = ResolvedPath.of("/data/file.csv");
+
+            assertThrows(FlagCheckException.class,
+                    () -> flagFileService.preCheck(ftpClient, "FLAG;" + flagPath + ";L", fileInfo));
+        }
+
+        @Test
+        @DisplayName("should return false when FLAG check file not found (existence check)")
+        void shouldReturnFalseWhenFlagCheckFileNotFound() {
+            when(ftpClient.exists("/data/missing.flg")).thenReturn(false);
+            boolean result = flagFileService.preCheck(ftpClient, "FLAG;/data/missing.flg;?", null);
+            assertFalse(result);
         }
     }
 

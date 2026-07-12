@@ -4,6 +4,7 @@ import com.fmsy.converter.CloseableIterator;
 import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.CommandType;
+import com.fmsy.exception.FlagCheckException;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.model.Command;
 import com.fmsy.model.FieldMapping;
@@ -153,26 +154,17 @@ class SingleUploadHandlerTest {
             // Phase 2: converter
             when(converterFactory.get("CSV")).thenReturn(fileConverter);
             when(uploadSupport.preAudit(command.getAuditCount(), config, fileInfo.fullPath(), fileConverter))
-                    .thenReturn(100);
+                    .thenReturn(0);
 
-            // Phase 2: readAndInsert
-            when(transferSupport.executeWithClient(eq("ftp1"), any()))
-                    .thenAnswer(invocation -> {
-                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
-                        return cb.run(ftpClient);
-                    });
+            // Phase 2: readAndInsert — uses insertAndVerifyInTx internally
             when(ftpClient.getInputStream(fileInfo.fullPath())).thenReturn(mock(InputStream.class));
             FieldMapping mapping = new FieldMapping();
             mapping.setTableFields(Collections.singletonList("col1"));
             when(fieldMappingBuilder.buildForUpload(config, null)).thenReturn(mapping);
 
-            Iterator<List<Map<String, Object>>> iterator = Collections.emptyIterator();
-            // Use a mock CloseableIterator that returns no data
-            when(fileConverter.parse(any(InputStream.class), any())).thenReturn(iterator);
-            when(uploadSupport.insertBatchInTx(eq(config), any(), eq(mapping), anyBoolean())).thenReturn(100);
-
-            // Phase 2 continued: postAudit must succeed for readAndInsert to return count >= 0
-            when(uploadSupport.postAudit(eq(config), anyInt(), anyInt())).thenReturn(true);
+            // insertAndVerifyInTx returns 100 (success), no error set on result
+            when(uploadSupport.insertAndVerifyInTx(eq(config), any(CloseableIterator.class),
+                    eq(mapping), anyBoolean(), any(Result.class))).thenReturn(100);
 
             // Phase 3: postProcess
             doNothing().when(transferSupport).postProcess(any(), eq(config), any(), anyInt());
@@ -213,22 +205,217 @@ class SingleUploadHandlerTest {
             when(transferSupport.preCheck(ftpClient, config, fileInfo)).thenReturn(true);
             when(converterFactory.get("CSV")).thenReturn(fileConverter);
             when(uploadSupport.preAudit(command.getAuditCount(), config, fileInfo.fullPath(), fileConverter))
-                    .thenReturn(100);
+                    .thenReturn(0);
 
-            // Second executeWithClient for readAndInsert
+            // readAndInsert: insertAndVerifyInTx returns 100 BUT sets result to ERROR
             when(ftpClient.getInputStream(fileInfo.fullPath())).thenReturn(mock(InputStream.class));
             FieldMapping mapping = new FieldMapping();
             mapping.setTableFields(Collections.singletonList("col1"));
             when(fieldMappingBuilder.buildForUpload(config, null)).thenReturn(mapping);
 
-            Iterator<List<Map<String, Object>>> iterator = Collections.emptyIterator();
-            when(fileConverter.parse(any(InputStream.class), any())).thenReturn(iterator);
-            when(uploadSupport.insertBatchInTx(eq(config), any(), eq(mapping), anyBoolean())).thenReturn(95);
+            when(uploadSupport.insertAndVerifyInTx(eq(config), any(CloseableIterator.class),
+                    eq(mapping), anyBoolean(), any(Result.class)))
+                    .thenAnswer(invocation -> {
+                        Result r = invocation.getArgument(4);
+                        r.setOutcome(0, ColumnNames.STATUS_ERROR, "Post-audit failed: file records=95, inserted=100");
+                        return 100;
+                    });
 
             handler.handle(command, config, result);
 
             assertEquals(0, result.getRecordCount());
             assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
+        }
+    }
+
+    @Nested
+    @DisplayName("handle - Phase 3 postProcess exception")
+    class HandlePhase3Exception {
+
+        @BeforeEach
+        void setup() throws Exception {
+            when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
+            when(transferSupport.executeWithClient(eq("ftp1"), any()))
+                    .thenAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(ftpClient);
+                    });
+            when(transferSupport.preCheck(ftpClient, config, fileInfo)).thenReturn(true);
+            when(converterFactory.get("CSV")).thenReturn(fileConverter);
+            when(uploadSupport.preAudit(any(), any(), anyString(), any())).thenReturn(0);
+            when(ftpClient.getInputStream(fileInfo.fullPath())).thenReturn(mock(InputStream.class));
+            FieldMapping mapping = new FieldMapping();
+            mapping.setTableFields(Collections.singletonList("col1"));
+            when(fieldMappingBuilder.buildForUpload(config, null)).thenReturn(mapping);
+            when(uploadSupport.insertAndVerifyInTx(eq(config), any(CloseableIterator.class),
+                    eq(mapping), anyBoolean(), any(Result.class))).thenReturn(100);
+            doThrow(new RuntimeException("FTP write timeout"))
+                    .when(transferSupport).postProcess(eq(ftpClient), eq(config), eq(fileInfo), eq(100));
+        }
+
+        @Test
+        @DisplayName("should set error with accurate record count and description when postProcess fails")
+        void shouldSetErrorWithRecordCountOnPostProcessFailure() throws Exception {
+            handler.handle(command, config, result);
+
+            assertEquals(100, result.getRecordCount());
+            assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
+            assertTrue(result.getDescription().contains("uploaded successfully"),
+                    "Description should mention successful upload");
+            assertTrue(result.getDescription().contains("100 records"),
+                    "Description should include record count");
+            assertTrue(result.getDescription().contains("FTP write timeout"),
+                    "Description should include original exception message");
+        }
+    }
+
+    @Nested
+    @DisplayName("handle - FlagCheckException from preCheck")
+    class HandlePreCheckFlagCheckException {
+
+        @BeforeEach
+        void setup() throws Exception {
+            when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
+            when(transferSupport.executeWithClient(eq("ftp1"), any()))
+                    .thenAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(ftpClient);
+                    });
+            when(transferSupport.preCheck(ftpClient, config, fileInfo))
+                    .thenThrow(new FlagCheckException("expected '100' == actual '50' (metric=L)"));
+        }
+
+        @Test
+        @DisplayName("should propagate FlagCheckException for Orchestrator to mark ERROR")
+        void shouldPropagateFlagCheckException() {
+            assertThrows(FlagCheckException.class,
+                    () -> handler.handle(command, config, result),
+                    "FlagCheckException should propagate to Orchestrator");
+            // 异常传播到 AbstractTransferOrchestrator.execute() 的 catch 块,
+            // 会调用 result.failWith(e) → STATUS_ERROR + 异常 message
+            verifyNoInteractions(converterFactory, uploadSupport);
+        }
+    }
+
+    @Nested
+    @DisplayName("handle - empty file scenarios")
+    class HandleEmptyFile {
+
+        private FieldMapping mapping;
+
+        @BeforeEach
+        void setupCommon() throws Exception {
+            when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
+            when(transferSupport.executeWithClient(eq("ftp1"), any()))
+                    .thenAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(ftpClient);
+                    });
+            when(transferSupport.preCheck(ftpClient, config, fileInfo)).thenReturn(true);
+            when(converterFactory.get("CSV")).thenReturn(fileConverter);
+            when(uploadSupport.preAudit(any(), any(), anyString(), any())).thenReturn(0);
+            when(ftpClient.getInputStream(fileInfo.fullPath())).thenReturn(mock(InputStream.class));
+            mapping = new FieldMapping();
+            mapping.setTableFields(Collections.singletonList("col1"));
+            when(fieldMappingBuilder.buildForUpload(config, null)).thenReturn(mapping);
+            doNothing().when(transferSupport).postProcess(any(), eq(config), any(), anyInt());
+        }
+
+        @Test
+        @DisplayName("should complete with 0 records when file is empty and handling is ALLOW")
+        void shouldCompleteWithZeroRecordsWhenEmptyAllow() throws Exception {
+            when(uploadSupport.insertAndVerifyInTx(eq(config), any(CloseableIterator.class),
+                    eq(mapping), anyBoolean(), any(Result.class))).thenReturn(0);
+            config.setEmptyDataHandling(com.fmsy.enums.EmptyDataHandling.ALLOW);
+
+            handler.handle(command, config, result);
+
+            assertEquals(0, result.getRecordCount());
+            assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
+            verify(transferSupport).postProcess(any(), eq(config), any(), eq(0));
+        }
+
+        @Test
+        @DisplayName("should propagate exception when file is empty and handling is ERROR")
+        void shouldPropagateExceptionWhenEmptyError() throws Exception {
+            when(uploadSupport.insertAndVerifyInTx(eq(config), any(CloseableIterator.class),
+                    eq(mapping), anyBoolean(), any(Result.class)))
+                    .thenThrow(new RuntimeException("Empty data handling: ERROR"));
+
+            assertThrows(RuntimeException.class,
+                    () -> handler.handle(command, config, result),
+                    "RuntimeException should propagate to Orchestrator");
+            // Orchestrator 会捕获并设置 STATUS_ERROR
+        }
+    }
+
+    @Nested
+    @DisplayName("handle - moveToErrorDir exception safety")
+    class HandleMoveToErrorDirException {
+
+        @BeforeEach
+        void setup() throws Exception {
+            when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
+            when(transferSupport.executeWithClient(eq("ftp1"), any()))
+                    .thenAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(ftpClient);
+                    });
+            when(transferSupport.preCheck(ftpClient, config, fileInfo)).thenReturn(true);
+            when(converterFactory.get("CSV")).thenReturn(fileConverter);
+            when(uploadSupport.preAudit(command.getAuditCount(), config, fileInfo.fullPath(), fileConverter))
+                    .thenReturn(-1);
+            // moveToErrorDir throws exception
+            when(ftpClient.moveToErrorDir(anyString())).thenThrow(new RuntimeException("FTP move failed"));
+        }
+
+        @Test
+        @DisplayName("should still set error outcome when moveToErrorDir throws")
+        void shouldSetErrorEvenWhenMoveToErrorDirThrows() throws Exception {
+            handler.handle(command, config, result);
+
+            assertEquals(0, result.getRecordCount());
+            assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
+            // 异常被 moveToErrorDir 内部 catch 住，不影响流程
+        }
+    }
+
+    @Nested
+    @DisplayName("handle - truncateFirst behavior")
+    class HandleTruncateFirst {
+
+        @BeforeEach
+        void setup() throws Exception {
+            when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
+            when(transferSupport.executeWithClient(eq("ftp1"), any()))
+                    .thenAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(ftpClient);
+                    });
+            when(transferSupport.preCheck(ftpClient, config, fileInfo)).thenReturn(true);
+            when(converterFactory.get("CSV")).thenReturn(fileConverter);
+            when(uploadSupport.preAudit(any(), any(), anyString(), any())).thenReturn(0);
+            when(ftpClient.getInputStream(fileInfo.fullPath())).thenReturn(mock(InputStream.class));
+            FieldMapping mapping = new FieldMapping();
+            mapping.setTableFields(Collections.singletonList("col1"));
+            when(fieldMappingBuilder.buildForUpload(config, null)).thenReturn(mapping);
+            when(uploadSupport.insertAndVerifyInTx(eq(config), any(CloseableIterator.class),
+                    eq(mapping), eq(true), any(Result.class))).thenReturn(100);
+            doNothing().when(transferSupport).postProcess(any(), eq(config), any(), anyInt());
+        }
+
+        @Test
+        @DisplayName("should pass truncateFirst=true to insertAndVerifyInTx when clearTableFlag=Y")
+        void shouldPassTruncateFirstTrue() throws Exception {
+            config.setClearTableFlag("Y");
+
+            handler.handle(command, config, result);
+
+            verify(uploadSupport).insertAndVerifyInTx(
+                    eq(config), any(CloseableIterator.class),
+                    any(FieldMapping.class), eq(true), any(Result.class));
+            assertEquals(100, result.getRecordCount());
+            assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
         }
     }
 }

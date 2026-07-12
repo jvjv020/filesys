@@ -1,5 +1,6 @@
 package com.fmsy.fileops;
 
+import com.fmsy.exception.FlagCheckException;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.util.ResolvedPath;
 import lombok.extern.slf4j.Slf4j;
@@ -153,6 +154,8 @@ public class FlagFileService {
 
     /**
      * FLAG 比对核心：根据 mode 解析取值码和比较符，计算实际值，比对。
+     * 比对不通过时抛出 {@link FlagCheckException}（标记 E），
+     * 文件不存在等基础检查失败仍返回 false（标记 N）。
      */
     private boolean checkFlagCompare(FtpClient client, String flagPattern,
                                       String expect, String mode, ResolvedPath dataFile) {
@@ -188,10 +191,12 @@ public class FlagFileService {
         // 执行比对
         boolean pass = compareValues(expect, actual, comparison);
         if (!pass) {
-            log.warn("FLAG check failed: {} expected '{}' {} actual '{}' (metric={})",
+            String msg = String.format("FLAG check failed: %s expected '%s' %s actual '%s' (metric=%s)",
                     flagPattern, expect, comparison, actual, metricStr);
+            log.warn(msg);
+            throw new FlagCheckException(msg);
         }
-        return pass;
+        return true;
     }
 
     /** 读取标志文件内容（首行，清理 \r 残留） */

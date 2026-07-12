@@ -1,11 +1,14 @@
 package com.fmsy.transfer.upload;
 
 import com.fmsy.config.DataSourceConfig;
+import com.fmsy.converter.CloseableIterator;
 import com.fmsy.converter.FileConverter;
+import com.fmsy.enums.EmptyDataHandling;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.ftp.FtpPool;
 import com.fmsy.ftp.FtpPool.FtpCallback;
 import com.fmsy.model.FieldMapping;
+import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.TransferSupport;
@@ -67,8 +70,8 @@ class UploadSupportTest {
     class PreAuditTests {
 
         @Test
-        @DisplayName("should return record count when audit passes")
-        void shouldReturnRecordCountWhenAuditPasses() throws Exception {
+        @DisplayName("should return 0 when audit passes")
+        void shouldReturnZeroWhenAuditPasses() throws Exception {
             TransferConfig config = new TransferConfig();
             config.setFtpName("ftp1");
 
@@ -82,7 +85,7 @@ class UploadSupportTest {
 
             int result = uploadSupport.preAudit(100, config, "/data/file.csv", fileConverter);
 
-            assertEquals(100, result);
+            assertEquals(0, result);
         }
 
         @Test
@@ -105,22 +108,16 @@ class UploadSupportTest {
         }
 
         @Test
-        @DisplayName("should return record count when auditCount is null")
-        void shouldReturnRecordCountWhenAuditCountIsNull() throws Exception {
+        @DisplayName("should return 0 immediately when auditCount is null (no file open)")
+        void shouldReturnZeroWhenAuditCountIsNull() throws Exception {
             TransferConfig config = new TransferConfig();
             config.setFtpName("ftp1");
 
-            when(ftpPool.withClient(eq("ftp1"), any(FtpCallback.class))).thenAnswer(invocation -> {
-                var callback = invocation.getArgument(1,
-                        FtpCallback.class);
-                return callback.run(ftpClient);
-            });
-            when(ftpClient.getInputStream("/data/file.csv")).thenReturn(mock(InputStream.class));
-            when(fileConverter.countRecords(any(InputStream.class), isNull())).thenReturn(200);
-
+            // No ftpPool interaction expected — should return immediately
             int result = uploadSupport.preAudit(null, config, "/data/file.csv", fileConverter);
 
-            assertEquals(200, result);
+            assertEquals(0, result);
+            verifyNoInteractions(ftpPool);
         }
 
         @Test
@@ -137,8 +134,8 @@ class UploadSupportTest {
         }
 
         @Test
-        @DisplayName("should return -1 when countRecords returns negative")
-        void shouldReturnMinusOneWhenCountRecordsReturnsNegative() throws Exception {
+        @DisplayName("should return 0 when countRecords returns negative (skip audit)")
+        void shouldReturnZeroWhenCountRecordsReturnsNegative() throws Exception {
             TransferConfig config = new TransferConfig();
             config.setFtpName("ftp1");
 
@@ -152,27 +149,20 @@ class UploadSupportTest {
 
             int result = uploadSupport.preAudit(100, config, "/data/file.csv", fileConverter);
 
-            assertEquals(-1, result);
+            assertEquals(0, result);
         }
 
         @Test
-        @DisplayName("should accept auditCount >= 0 when passed with negative value")
-        void shouldAcceptNegativeAuditCount() throws Exception {
+        @DisplayName("should return 0 immediately when auditCount is negative")
+        void shouldReturnZeroWhenAuditCountIsNegative() throws Exception {
             TransferConfig config = new TransferConfig();
             config.setFtpName("ftp1");
 
-            when(ftpPool.withClient(eq("ftp1"), any(FtpCallback.class))).thenAnswer(invocation -> {
-                var callback = invocation.getArgument(1,
-                        FtpCallback.class);
-                return callback.run(ftpClient);
-            });
-            when(ftpClient.getInputStream("/data/file.csv")).thenReturn(mock(InputStream.class));
-            when(fileConverter.countRecords(any(InputStream.class), isNull())).thenReturn(150);
-
-            // auditCount < 0 should skip audit check but still return record count
+            // No ftpPool interaction expected — should return immediately
             int result = uploadSupport.preAudit(-1, config, "/data/file.csv", fileConverter);
 
-            assertEquals(150, result);
+            assertEquals(0, result);
+            verifyNoInteractions(ftpPool);
         }
     }
 
@@ -319,6 +309,263 @@ class UploadSupportTest {
             int count = uploadSupport.insertBatchInTx(config, emptyIter, mapping);
             assertEquals(0, count);
             verifyNoInteractions(targetTableRepository);
+        }
+    }
+
+    @Nested
+    @DisplayName("insertAndVerifyInTx")
+    class InsertAndVerifyInTxTests {
+
+        @Test
+        @DisplayName("should insert records and verify in transaction")
+        void shouldInsertAndVerifyInTransaction() {
+            when(dbPool.getTransactionTemplate(anyString())).thenReturn(transactionTemplate);
+            when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
+                var callback = invocation.getArgument(0,
+                        org.springframework.transaction.support.TransactionCallback.class);
+                return callback.doInTransaction(transactionStatus);
+            });
+            when(transferSupport.handleEmptyData(anyInt(), any())).thenReturn(true);
+
+            TransferConfig config = new TransferConfig();
+            config.setDbName("DB1");
+            config.setTableName("mytable");
+            config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
+
+            Result result = new Result();
+
+            FieldMapping mapping = new FieldMapping();
+            mapping.setTableFields(Arrays.asList("col1", "col2"));
+
+            Map<String, Object> record1 = new HashMap<>();
+            record1.put("col1", "val1");
+            record1.put("col2", "val2");
+            List<List<Map<String, Object>>> batches = new ArrayList<>();
+            batches.add(Collections.singletonList(record1));
+            CloseableIterator<List<Map<String, Object>>> dataIter =
+                    new CloseableIterator<>(batches.iterator());
+
+            int count = uploadSupport.insertAndVerifyInTx(config, dataIter, mapping, false, result);
+
+            // Expect 1 record inserted successfully
+            assertEquals(1, count);
+            verify(targetTableRepository, atLeastOnce()).batchInsert(
+                    eq("DB1"), eq("mytable"), anyList(), anyList());
+        }
+
+        @Test
+        @DisplayName("should return 0 for empty iterator (post-audit passes: 0==0)")
+        void shouldReturnZeroForEmptyIterator() {
+            when(dbPool.getTransactionTemplate(anyString())).thenReturn(transactionTemplate);
+            when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
+                var callback = invocation.getArgument(0,
+                        org.springframework.transaction.support.TransactionCallback.class);
+                return callback.doInTransaction(transactionStatus);
+            });
+            when(transferSupport.handleEmptyData(eq(0), any())).thenReturn(true);
+
+            TransferConfig config = new TransferConfig();
+            config.setDbName("DB1");
+            config.setTableName("mytable");
+            config.setEmptyDataHandling(EmptyDataHandling.ERROR);
+
+            Result result = new Result();
+
+            FieldMapping mapping = new FieldMapping();
+            mapping.setTableFields(Collections.singletonList("col1"));
+
+            CloseableIterator<List<Map<String, Object>>> emptyIter =
+                    new CloseableIterator<>(Collections.emptyIterator());
+
+            int count = uploadSupport.insertAndVerifyInTx(config, emptyIter, mapping, false, result);
+
+            assertEquals(0, count);
+        }
+
+        @Test
+        @DisplayName("should handle empty data with ALLOW mode")
+        void shouldHandleEmptyDataWithAllow() {
+            when(dbPool.getTransactionTemplate(anyString())).thenReturn(transactionTemplate);
+            when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
+                var callback = invocation.getArgument(0,
+                        org.springframework.transaction.support.TransactionCallback.class);
+                return callback.doInTransaction(transactionStatus);
+            });
+            when(transferSupport.handleEmptyData(eq(0), eq(EmptyDataHandling.ALLOW))).thenReturn(true);
+
+            TransferConfig config = new TransferConfig();
+            config.setDbName("DB1");
+            config.setTableName("mytable");
+            config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
+
+            Result result = new Result();
+
+            FieldMapping mapping = new FieldMapping();
+            mapping.setTableFields(Collections.singletonList("col1"));
+
+            CloseableIterator<List<Map<String, Object>>> emptyIter =
+                    new CloseableIterator<>(Collections.emptyIterator());
+
+            int count = uploadSupport.insertAndVerifyInTx(config, emptyIter, mapping, false, result);
+
+            assertEquals(0, count);
+        }
+
+        @Test
+        @DisplayName("should throw on post-audit failure in ERROR mode")
+        void shouldThrowOnPostAuditFailureInErrorMode() {
+            when(dbPool.getTransactionTemplate(anyString())).thenReturn(transactionTemplate);
+            when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
+                var callback = invocation.getArgument(0,
+                        org.springframework.transaction.support.TransactionCallback.class);
+                return callback.doInTransaction(transactionStatus);
+            });
+            when(transferSupport.handleEmptyData(anyInt(), any())).thenReturn(true);
+
+            TransferConfig config = new TransferConfig();
+            config.setDbName("DB1");
+            config.setTableName("mytable");
+            config.setEmptyDataHandling(EmptyDataHandling.ERROR);
+
+            Result result = new Result();
+
+            FieldMapping mapping = new FieldMapping();
+            mapping.setTableFields(Collections.singletonList("col1"));
+
+            // Spy on uploadSupport to mock postAudit to return false
+            UploadSupport spySupport = spy(uploadSupport);
+            doReturn(false).when(spySupport).postAudit(any(), anyInt(), anyInt());
+
+            Map<String, Object> record = new HashMap<>();
+            record.put("col1", "val1");
+            List<List<Map<String, Object>>> batches = new ArrayList<>();
+            batches.add(Collections.singletonList(record));
+            CloseableIterator<List<Map<String, Object>>> dataIter =
+                    new CloseableIterator<>(batches.iterator());
+
+            assertThrows(RuntimeException.class,
+                    () -> spySupport.insertAndVerifyInTx(config, dataIter, mapping, false, result));
+        }
+
+        @Test
+        @DisplayName("should keep data and set ERROR result in non-ERROR mode post-audit failure")
+        void shouldKeepDataAndSetErrorOnNonErrorPostAuditFailure() {
+            when(dbPool.getTransactionTemplate(anyString())).thenReturn(transactionTemplate);
+            when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
+                var callback = invocation.getArgument(0,
+                        org.springframework.transaction.support.TransactionCallback.class);
+                return callback.doInTransaction(transactionStatus);
+            });
+            when(transferSupport.handleEmptyData(anyInt(), any())).thenReturn(true);
+
+            TransferConfig config = new TransferConfig();
+            config.setDbName("DB1");
+            config.setTableName("mytable");
+            config.setEmptyDataHandling(EmptyDataHandling.ALLOW); // non-ERROR
+
+            Result result = new Result();
+
+            FieldMapping mapping = new FieldMapping();
+            mapping.setTableFields(Collections.singletonList("col1"));
+
+            // Spy on uploadSupport to mock postAudit to return false
+            UploadSupport spySupport = spy(uploadSupport);
+            doReturn(false).when(spySupport).postAudit(any(), anyInt(), anyInt());
+
+            Map<String, Object> record = new HashMap<>();
+            record.put("col1", "val1");
+            List<List<Map<String, Object>>> batches = new ArrayList<>();
+            batches.add(Collections.singletonList(record));
+            CloseableIterator<List<Map<String, Object>>> dataIter =
+                    new CloseableIterator<>(batches.iterator());
+
+            int count = spySupport.insertAndVerifyInTx(config, dataIter, mapping, false, result);
+
+            // Data committed (returned count), result marked ERROR with description
+            assertEquals(1, count);
+            assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
+            assertTrue(result.getDescription().contains("Post-audit failed"));
+        }
+
+        @Test
+        @DisplayName("should truncate first when truncateFirst is true")
+        void shouldTruncateFirstInInsertAndVerify() {
+            when(dbPool.getTransactionTemplate(anyString())).thenReturn(transactionTemplate);
+            when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
+                var callback = invocation.getArgument(0,
+                        org.springframework.transaction.support.TransactionCallback.class);
+                return callback.doInTransaction(transactionStatus);
+            });
+            when(transferSupport.handleEmptyData(anyInt(), any())).thenReturn(true);
+
+            TransferConfig config = new TransferConfig();
+            config.setDbName("DB1");
+            config.setTableName("mytable");
+            config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
+
+            Result result = new Result();
+
+            FieldMapping mapping = new FieldMapping();
+            mapping.setTableFields(Collections.singletonList("col1"));
+
+            Map<String, Object> record = new HashMap<>();
+            record.put("col1", "val1");
+            List<List<Map<String, Object>>> batches = new ArrayList<>();
+            batches.add(Collections.singletonList(record));
+            CloseableIterator<List<Map<String, Object>>> dataIter =
+                    new CloseableIterator<>(batches.iterator());
+
+            int count = uploadSupport.insertAndVerifyInTx(config, dataIter, mapping, true, result);
+
+            assertEquals(1, count);
+            verify(targetTableRepository).truncate("DB1", "mytable");
+            verify(targetTableRepository, atLeastOnce()).batchInsert(
+                    eq("DB1"), eq("mytable"), anyList(), anyList());
+        }
+
+        @Test
+        @DisplayName("should insert multiple batches when data exceeds batch size")
+        void shouldInsertMultipleBatches() {
+            when(dbPool.getTransactionTemplate(anyString())).thenReturn(transactionTemplate);
+            when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
+                var callback = invocation.getArgument(0,
+                        org.springframework.transaction.support.TransactionCallback.class);
+                return callback.doInTransaction(transactionStatus);
+            });
+            when(transferSupport.handleEmptyData(anyInt(), any())).thenReturn(true);
+
+            TransferConfig config = new TransferConfig();
+            config.setDbName("DB1");
+            config.setTableName("mytable");
+            config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
+
+            Result result = new Result();
+
+            FieldMapping mapping = new FieldMapping();
+            mapping.setTableFields(Collections.singletonList("col1"));
+
+            // Generate 2500 records → should exceed DEFAULT_BATCH_SIZE (1000)
+            // and produce 3 batch inserts (1000 + 1000 + 500)
+            List<List<Map<String, Object>>> allBatches = new ArrayList<>();
+            for (int batchIdx = 0; batchIdx < 3; batchIdx++) {
+                List<Map<String, Object>> chunk = new ArrayList<>();
+                int chunkSize = batchIdx < 2 ? 1000 : 500;
+                for (int i = 0; i < chunkSize; i++) {
+                    Map<String, Object> record = new HashMap<>();
+                    record.put("col1", "val_" + batchIdx + "_" + i);
+                    chunk.add(record);
+                }
+                allBatches.add(chunk);
+            }
+            CloseableIterator<List<Map<String, Object>>> dataIter =
+                    new CloseableIterator<>(allBatches.iterator());
+
+            int count = uploadSupport.insertAndVerifyInTx(config, dataIter, mapping, false, result);
+
+            assertEquals(2500, count);
+            // Verify at least 3 batchInsert calls (exact count depends on batching)
+            verify(targetTableRepository, atLeast(3)).batchInsert(
+                    eq("DB1"), eq("mytable"), anyList(), anyList());
         }
     }
 

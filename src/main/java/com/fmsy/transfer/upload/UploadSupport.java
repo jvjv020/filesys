@@ -1,13 +1,16 @@
 package com.fmsy.transfer.upload;
 
 import com.fmsy.config.DataSourceConfig;
+import com.fmsy.converter.CloseableIterator;
 import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.EmptyDataHandling;
 import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.FieldMapping;
+import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.TransferSupport;
+import com.fmsy.util.ColumnNames;
 import com.fmsy.util.SystemConstants;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -54,16 +57,20 @@ public class UploadSupport {
      * <p>使用格式对应的 {@link FileConverter#countRecords} 统计文件记录数,
      * 而非通用行数统计(CSV/TXT 逐行、DBF 从文件头读、XML 返回 -1)。
      *
-     * <p>无论审计是否配置,都会统计文件记录数并返回,
-     * 供 {@link #postAudit} 复用,避免重复读文件。
+     * <p>当 auditCount 为 null/负数(表示不校验)时,跳过 FTP 文件流打开,
+     * 避免对无法统计记录数的格式(如 XML)做无谓的 I/O。
      *
      * @param auditCount 期望行数(null 或负数表示不校验)
      * @param config     传输配置
      * @param filePath   FTP 文件路径
      * @param converter  文件格式转换器(用于按格式统计记录数)
-     * @return 文件的记录数(审计通过时);审计不通过或无法统计返回 -1
+     * @return 0 表示通过或无需审计, -1 表示审计不通过或审计异常
      */
     public int preAudit(Integer auditCount, TransferConfig config, String filePath, FileConverter converter) {
+        // 未配置审计 → 无需打开文件流
+        if (auditCount == null || auditCount < 0) {
+            return 0;
+        }
         try {
             int recordCount = ftpPool.withClient(config.getFtpName(), client -> {
                 try (InputStream is = client.getInputStream(filePath)) {
@@ -71,17 +78,19 @@ public class UploadSupport {
                 }
             });
             if (recordCount < 0) {
-                log.error("Pre-audit: unable to count records for {} format, skipping", converter.getFormat());
+                // 格式无法统计记录数(如 XML),跳过前稽核而非报错退出
+                log.warn("Pre-audit: unable to count records for {} format, skipping pre-audit", converter.getFormat());
+                return 0;
+            }
+            boolean passed = recordCount == auditCount;
+            log.info("Pre-audit file records: expected={}, actual={}, passed={}", auditCount, recordCount, passed);
+            if (!passed) {
+                log.error("Pre-audit failed: expected {} records, got {} for file {}", auditCount, recordCount, filePath);
                 return -1;
             }
-            if (auditCount != null && auditCount >= 0) {
-                boolean passed = recordCount == auditCount;
-                log.info("Pre-audit file records: expected={}, actual={}, passed={}", auditCount, recordCount, passed);
-                return passed ? recordCount : -1;
-            }
-            return recordCount;
+            return 0;
         } catch (Exception e) {
-            log.error("Pre-audit failed: {}", e.getMessage(), e);
+            log.error("Pre-audit failed for {}: {}", filePath, e.getMessage(), e);
             return -1;
         }
     }
@@ -168,6 +177,89 @@ public class UploadSupport {
 
             if (!transferSupport.handleEmptyData(totalRecords, emptyHandling)) {
                 throw new RuntimeException("Empty data handling: " + emptyHandling);
+            }
+
+            log.debug("Inserted {} records in single transaction", totalRecords);
+            return totalRecords;
+        });
+    }
+
+    /**
+     * 在事务中执行插入 + 后审计 — 后审计在事务内完成,失败时(ERROR 模式)事务回滚,
+     * 清表和增量模式均支持全量回滚,避免增量模式下已插入记录无法撤销的问题。
+     *
+     * <p>后审计失败时:
+     * <ul>
+     *   <li>ERROR 模式:抛出异常触发事务回滚,已插入数据全部撤销</li>
+     *   <li>非 ERROR 模式:数据提交,但 result 设 ERROR 状态供调用方判断</li>
+     * </ul>
+     *
+     * @param config        传输配置
+     * @param dataIter      数据迭代器(需支持 {@link CloseableIterator#getRecordCount()})
+     * @param mapping       字段映射
+     * @param truncateFirst 是否先清表
+     * @param result        结果对象(后审计失败时设置描述)
+     * @return 成功插入的记录数
+     */
+    public int insertAndVerifyInTx(TransferConfig config, CloseableIterator<List<Map<String, Object>>> dataIter,
+                                    FieldMapping mapping, boolean truncateFirst, Result result) {
+        String dbName = config.getDbName();
+        TransactionTemplate tx = dbPool.getTransactionTemplate(dbName);
+        EmptyDataHandling emptyHandling = config.getEmptyDataHandling();
+        List<String> fields = mapping.getTableFields();
+
+        return tx.execute(status -> {
+            if (truncateFirst) {
+                targetTableRepository.truncate(config.getDbName(), config.getTableName());
+            }
+            int batchSize = SystemConstants.DEFAULT_BATCH_SIZE;
+            List<Object[]> batch = new ArrayList<>();
+            int totalRecords = 0;
+
+            while (dataIter.hasNext()) {
+                List<Map<String, Object>> batchChunk = dataIter.next();
+                if (batchChunk.isEmpty()) continue;
+
+                for (Map<String, Object> record : batchChunk) {
+                    Object[] values = new Object[fields.size()];
+                    for (int i = 0; i < fields.size(); i++) {
+                        values[i] = mapping.getValue(record, fields.get(i));
+                    }
+                    batch.add(values);
+
+                    if (batch.size() >= batchSize) {
+                        targetTableRepository.batchInsert(
+                                config.getDbName(), config.getTableName(), fields, batch);
+                        totalRecords += batch.size();
+                        batch.clear();
+                    }
+                }
+            }
+
+            if (!batch.isEmpty()) {
+                targetTableRepository.batchInsert(
+                        config.getDbName(), config.getTableName(), fields, batch);
+                totalRecords += batch.size();
+            }
+
+            // 空数据判断在事务内,ERROR/SKIP 模式直接回滚
+            if (!transferSupport.handleEmptyData(totalRecords, emptyHandling)) {
+                throw new RuntimeException("Empty data handling: " + emptyHandling);
+            }
+
+            // 后审计在事务内完成,ERROR 模式可回滚未提交的数据
+            int fileRecordCount = dataIter.getRecordCount();
+            if (!postAudit(config, fileRecordCount, totalRecords)) {
+                if (emptyHandling == EmptyDataHandling.ERROR) {
+                    throw new RuntimeException("Post-audit failed: file records=" + fileRecordCount
+                            + ", inserted=" + totalRecords + " for " + config.getTableName());
+                }
+                // 非 ERROR 模式:数据提交,但记录错误信息
+                log.warn("Post-audit failed (non-ERROR mode): file records={}, inserted={}, data kept",
+                        fileRecordCount, totalRecords);
+                result.setOutcome(0, ColumnNames.STATUS_ERROR,
+                        "Post-audit failed: file records=" + fileRecordCount
+                                + ", inserted=" + totalRecords + " for " + config.getTableName());
             }
 
             log.debug("Inserted {} records in single transaction", totalRecords);
