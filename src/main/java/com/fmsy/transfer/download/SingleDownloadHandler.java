@@ -29,6 +29,7 @@ public class SingleDownloadHandler implements TransferHandler {
     private final DownloadSupport support;
     private final TransferSupport transferSupport;
     private final ParallelFileGenerator parallelFileGenerator;
+    private final ConverterFactory converterFactory;
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
@@ -71,7 +72,7 @@ public class SingleDownloadHandler implements TransferHandler {
 
         // Phase 3: FTP data transfer + postProcess
         int recordCount = transferSupport.executeWithClient(ftpName, client -> {
-            var converter = ConverterFactory.get(config.getParserType());
+            var converter = converterFactory.get(config.getParserType());
             var mapping = fieldMappingBuilder.buildForDownload(config);
             int count;
             try (OutputStream os = client.getOutputStream(fileInfo.fullPath())) {

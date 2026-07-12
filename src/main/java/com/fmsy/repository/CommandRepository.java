@@ -321,7 +321,7 @@ public class CommandRepository {
         cmd.setCategoryCode((String) row.get(ColumnNames.CATEGORY_CODE));
         cmd.setControlCode((String) row.get(ColumnNames.CONTROL_CODE));
         String type = (String) row.get(ColumnNames.COMMAND_TYPE);
-        cmd.setCommandType(type == null ? null : CommandType.fromCode(type));
+        cmd.setCommandType(CommandType.fromCode(type));
         cmd.setAuditCount(row.get(ColumnNames.AUDIT_COUNT) != null
                 ? ((Number) row.get(ColumnNames.AUDIT_COUNT)).intValue() : null);
         cmd.setExtraInfo((String) row.get(ColumnNames.EXTRA_INFO));

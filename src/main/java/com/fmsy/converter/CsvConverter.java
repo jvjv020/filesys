@@ -141,7 +141,7 @@ public class CsvConverter implements FileConverter {
         private final List<String> headers;
         private final String separator;
         private final String quote;
-        private String[] nextLine;
+        private List<String> nextLine;
         private boolean hasNext = true;
         private boolean closed = false;
         private static final int BATCH_SIZE = 1000;
@@ -250,8 +250,8 @@ public class CsvConverter implements FileConverter {
                 int count = 0;
                 while (count < BATCH_SIZE && nextLine != null) {
                     Map<String, Object> record = new HashMap<>();
-                    for (int i = 0; i < headers.size() && i < nextLine.length; i++) {
-                        record.put(headers.get(i), nextLine[i]);
+                    for (int i = 0; i < headers.size() && i < nextLine.size(); i++) {
+                        record.put(headers.get(i), nextLine.get(i));
                     }
                     batch.add(record);
                     count++;

@@ -4,6 +4,7 @@ import com.fmsy.converter.CloseableIterator;
 import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.EmptyDataHandling;
+import com.fmsy.ftp.FtpClient;
 import com.fmsy.model.Command;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
@@ -33,6 +34,7 @@ public class SingleUploadHandler implements TransferHandler {
     private final FieldMappingBuilder fieldMappingBuilder;
     private final UploadSupport support;
     private final TransferSupport transferSupport;
+    private final ConverterFactory converterFactory;
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
@@ -48,7 +50,7 @@ public class SingleUploadHandler implements TransferHandler {
         }
 
         // Phase 2 (DB + FTP): preAudit(内部借还FTP) → 读文件解析 → 插入
-        FileConverter converter = ConverterFactory.get(config.getParserType());
+        FileConverter converter = converterFactory.get(config.getParserType());
         int fileLineCount = support.preAudit(command.getAuditCount(), config, fileInfo.fullPath(), converter);
         if (fileLineCount < 0) {
             result.setOutcome(0, ColumnNames.STATUS_ERROR, "Pre-audit failed");

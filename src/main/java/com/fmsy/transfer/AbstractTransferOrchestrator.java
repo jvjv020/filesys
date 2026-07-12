@@ -7,6 +7,7 @@ import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.ResultRepository;
+import com.fmsy.transfer.download.ChildCommandMonitor;
 import lombok.extern.slf4j.Slf4j;
 
 /**

@@ -135,7 +135,7 @@ public class AuditService {
         if (source instanceof String[] args && args.length >= 2) {
             String ftpName = args[0];
             String filePath = args[1];
-            int lineCount = ftpPool.withClient(ftpName, client -> client.countFileLines(filePath));
+            int lineCount = ftpPool.withClient(ftpName, (FtpPool.FtpCallback<Integer>) client -> client.countFileLines(filePath));
             boolean passed = lineCount == auditCount;
             log.info("Pre-audit file records, expected: {}, actual: {}, passed={}", auditCount, lineCount, passed);
             return passed ? lineCount : -1;
@@ -185,6 +185,6 @@ public class AuditService {
         } else {
             return 0;
         }
-        return ftpPool.withClient(resolvedFtpName, client -> client.countFileLines(filePath));
+        return ftpPool.withClient(resolvedFtpName, (FtpPool.FtpCallback<Integer>) client -> client.countFileLines(filePath));
     }
 }

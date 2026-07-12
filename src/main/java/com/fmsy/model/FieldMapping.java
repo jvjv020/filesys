@@ -27,11 +27,12 @@ public class FieldMapping {
 
     /**
      * 获取字段值
-     * 优先级：record中的值 > extraFields中的值
+     * 优先级：record中的值（非null） > extraFields中的值
      */
     public Object getValue(Map<String, Object> record, String fieldName) {
         if (record.containsKey(fieldName)) {
-            return record.get(fieldName);
+            Object value = record.get(fieldName);
+            if (value != null) return value;
         }
         if (extraFields != null && extraFields.containsKey(fieldName)) {
             return extraFields.get(fieldName);

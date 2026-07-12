@@ -2,6 +2,7 @@ package com.fmsy.repository;
 
 import com.fmsy.config.DataSourceConfig;
 import com.fmsy.db.JdbcTemplateWrapper;
+import com.fmsy.enums.TransferScenario;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.TableNames;
@@ -40,7 +41,7 @@ public class TransferConfigRepository {
             TransferConfig config = new TransferConfig();
             config.setCategoryCode(rs.getString(ColumnNames.CATEGORY_CODE));
             config.setControlCode(rs.getString(ColumnNames.CONTROL_CODE));
-            config.setScenario(rs.getString(ColumnNames.SCENARIO));
+            config.setScenario(TransferScenario.valueOf(rs.getString(ColumnNames.SCENARIO)));
             config.setDbName(rs.getString(ColumnNames.DB_NAME));
             config.setTableName(rs.getString(ColumnNames.TABLE_NAME));
             config.setFtpName(rs.getString(ColumnNames.FTP_NAME));

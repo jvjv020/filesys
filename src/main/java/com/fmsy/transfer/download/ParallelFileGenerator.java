@@ -154,7 +154,7 @@ public class ParallelFileGenerator {
                     log.debug("Parallel[{}] partition {} completed: {} records", tag, partitionName, count);
                 } catch (Exception e) {
                     log.error("Parallel[{}] partition {} failed: {}", tag, partitionName, e.getMessage(), e);
-                    throw e;
+                    throw new RuntimeException(e);
                 }
             }));
         }
@@ -233,8 +233,12 @@ public class ParallelFileGenerator {
     private static int countCompleted(List<Path> tempFiles) {
         int count = 0;
         for (Path p : tempFiles) {
-            if (Files.exists(p) && Files.size(p) > 0) {
-                count++;
+            try {
+                if (Files.exists(p) && Files.size(p) > 0) {
+                    count++;
+                }
+            } catch (IOException e) {
+                // ignore, file might be deleted concurrently
             }
         }
         return count;

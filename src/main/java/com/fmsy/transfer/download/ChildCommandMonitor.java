@@ -63,7 +63,8 @@ public class ChildCommandMonitor {
                                TransferSupport transferSupport,
                                ResultRepository resultRepository,
                                CommandRepository commandRepository,
-                               DataSourceConfig.DbPool dbPool) {
+                               DataSourceConfig.DbPool dbPool,
+                               TempTransferConfigFactory tempConfigFactory) {
         this.detailRepository = detailRepository;
         this.configLoader = configLoader;
         this.ftpPool = ftpPool;
@@ -71,6 +72,7 @@ public class ChildCommandMonitor {
         this.resultRepository = resultRepository;
         this.commandRepository = commandRepository;
         this.dbPool = dbPool;
+        this.tempConfigFactory = tempConfigFactory;
     }
 
     /** 后台调度器(daemon 线程,不阻塞 JVM 退出) */
@@ -203,9 +205,11 @@ public class ChildCommandMonitor {
         String description = String.format("Multi-node summary: %d detail(s)", details.size());
         String resolvedDb = dbName != null ? dbName : ColumnNames.DEFAULT_DB;
         // UPDATE 指令表 + INSERT 结果表 原子化,避免"指令置终态但结果表未写"
+        String finalCategoryCode = categoryCode;
+        String finalControlCode = controlCode;
         dbPool.getTransactionTemplate(resolvedDb).execute(status -> {
             commandRepository.updateMainStatus(mainCommandId, finalStatus);
-            resultRepository.insertSimple(mainCommandId, categoryCode, controlCode, finalStatus, description, resolvedDb);
+            resultRepository.insertSimple(mainCommandId, finalCategoryCode, finalControlCode, finalStatus, description, resolvedDb);
             return null;
         });
         log.info("Updated main command status: {} -> {}", mainCommandId, finalStatus);
@@ -227,8 +231,9 @@ public class ChildCommandMonitor {
                 if (totalFlagOnlyOps != null) {
                     log.info("Generating total flag for main command: {}", mainCommandId);
                     ResolvedPath fileInfo = ResolvedPath.of(config.getFilePath());
-                    ftpPool.withClient(config.getFtpName(), client ->
-                            transferSupport.postProcess(client, totalFlagOnlyOps, fileInfo));
+                    ftpPool.withClient(config.getFtpName(), client -> {
+                        transferSupport.postProcess(client, totalFlagOnlyOps, fileInfo);
+                    });
                 }
             }
         }

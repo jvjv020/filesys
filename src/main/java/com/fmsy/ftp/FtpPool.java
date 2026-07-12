@@ -375,7 +375,7 @@ public class FtpPool {
 
         private FTPClient createClientWithFailover() {
             FTPClient client = new FTPClient();
-            FtpPoolConfig.Failover failover = config.getFailover();
+            FtpPoolConfig.FtpConfig.Failover failover = config.getFailover();
             List<String> hostsToTry = resolveHostWithFailover();
 
             if (failover.isEnabled() && hostsToTry.size() > 1) {

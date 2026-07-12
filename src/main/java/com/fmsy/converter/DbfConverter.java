@@ -1,6 +1,7 @@
 package com.fmsy.converter;
 
 import com.fmsy.model.FieldMapping;
+import com.fmsy.util.SystemConstants;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.*;
@@ -119,7 +120,7 @@ public class DbfConverter implements FileConverter {
         }
     }
 
-    private static Charset resolveEncoding(FieldMapping mapping) {
+    private Charset resolveEncoding(FieldMapping mapping) {
         Map<String, String> cfg = ConverterUtils.mergeConfig(getDefaultConfig(), mapping);
         return ConverterUtils.resolveCharset(cfg.getOrDefault("encoding", "GBK"), DEFAULT_ENCODING);
     }
@@ -215,9 +216,10 @@ public class DbfConverter implements FileConverter {
 
         output.write(0x03);
         Calendar cal = Calendar.getInstance();
-        output.write(intToBcd(cal.get(Calendar.YEAR)));
-        output.write(intToBcd(cal.get(Calendar.MONTH) + 1));
-        output.write(intToBcd(cal.get(Calendar.DAY_OF_MONTH)));
+        // DBF 规范: YY (1字节), MM (1字节), DD (1字节) — 仅存末两位
+        output.write(cal.get(Calendar.YEAR) % 100);
+        output.write(cal.get(Calendar.MONTH) + 1);
+        output.write(cal.get(Calendar.DAY_OF_MONTH));
 
         // bytes 4-7: 总记录数 (LE int32)
         output.write(intToLittleEndian((int) recordCount, 4));
@@ -251,6 +253,7 @@ public class DbfConverter implements FileConverter {
         int recordCount = 0;
         while (data.hasNext()) {
             List<Map<String, Object>> batch = data.next();
+            System.out.println("[DBF] writeRecords: batch.size=" + batch.size() + " fieldSpecs=" + fieldSpecs.size());
             for (Map<String, Object> record : batch) {
                 output.write(' ');
                 for (FieldSpec spec : fieldSpecs) {
@@ -260,6 +263,7 @@ public class DbfConverter implements FileConverter {
                 recordCount++;
             }
         }
+        System.out.println("[DBF] writeRecords: total recordCount=" + recordCount);
         return recordCount;
     }
 
@@ -442,6 +446,7 @@ public class DbfConverter implements FileConverter {
                 // 字节8-9: header 字节数 LE int16
                 byte[] headerSizeBytes = new byte[2];
                 input.read(headerSizeBytes);
+                int headerSize = littleEndianToInt(headerSizeBytes);
                 // 字节10-11: 单条记录字节数 LE int16
                 byte[] recordSizeBytes = new byte[2];
                 input.read(recordSizeBytes);
@@ -450,9 +455,13 @@ public class DbfConverter implements FileConverter {
                 for (int i = 0; i < 20; i++) {
                     input.read();
                 }
-
                 // 字节32起: 字段描述符, 每个 32 字节, 字段描述符后是 0x0D 终止符
                 readFieldDescriptors();
+                // After descriptors: should be at data start; peek next byte
+                input.mark(1);
+                int next = input.read();
+                System.out.println("[DBF] init: totalRecords=" + totalRecords + " headerSize=" + headerSize + " recordSize=" + recordSize + " fieldCount=" + fieldNames.size() + " nextByte=" + next + " avail=" + input.available() + " posAfterDescs=" + (headerSize + 1));
+                input.reset(); // restore since we peeked
 
                 buffer = new byte[recordSize];
             } catch (IOException e) {
@@ -466,11 +475,9 @@ public class DbfConverter implements FileConverter {
                 byte[] fieldDesc = new byte[FIELD_DESC_SIZE];
                 int read = input.read(fieldDesc);
                 if (read < FIELD_DESC_SIZE) {
-                    // 文件意外结束
                     break;
                 }
                 if (fieldDesc[0] == HEADER_TERMINATOR) {
-                    // 字段描述符结束
                     break;
                 }
                 String fieldName = new String(fieldDesc, 0, 10, encoding).trim();
@@ -490,11 +497,13 @@ public class DbfConverter implements FileConverter {
         /** 返回一批记录（流式读取） */
         @Override
         public List<Map<String, Object>> next() {
+            System.out.println("[DBF] next: hasNext=" + hasNext + " cur=" + currentRecord + " total=" + totalRecords + " bufLen=" + buffer.length);
             List<Map<String, Object>> batch = new ArrayList<>();
             int batchCount = 0;
             while (hasNext && currentRecord < totalRecords && batchCount < DEFAULT_BATCH_SIZE) {
                 try {
                     int read = input.read(buffer);
+                    System.out.println("[DBF]   read=" + read + " buf[0]=" + (buffer.length > 0 ? buffer[0] : "n/a"));
                     if (read < buffer.length) {
                         hasNext = false;
                         break;

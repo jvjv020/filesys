@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -213,8 +214,12 @@ public class FlagFileService {
         if (dataFile == null || dataFile.fullPath() == null) return null;
         String path = dataFile.fullPath();
         return switch (metric.toUpperCase()) {
-            case "L" -> String.valueOf(client.countFileLines(path));
-            case "S" -> String.valueOf(client.getFileSize(path));
+            case "L" -> {
+                try { yield String.valueOf(client.countFileLines(path)); } catch (IOException e) { throw new RuntimeException(e); }
+            }
+            case "S" -> {
+                try { yield String.valueOf(client.getFileSize(path)); } catch (IOException e) { throw new RuntimeException(e); }
+            }
             case "M" -> client.computeMd5(path);
             default -> {
                 log.warn("Unknown FLAG metric: {}", metric);
@@ -439,11 +444,11 @@ public class FlagFileService {
             // 先检查直接传入的值
             return switch (code) {
                 case "L" -> lines != null ? lines : (client != null && fileInfo != null
-                        ? String.valueOf(client.countFileLines(fileInfo.fullPath())) : null);
+                        ? safeCountFileLines(client, fileInfo.fullPath()) : null);
                 case "S" -> size != null ? size : (client != null && fileInfo != null
-                        ? String.valueOf(client.getFileSize(fileInfo.fullPath())) : null);
+                        ? safeGetFileSize(client, fileInfo.fullPath()) : null);
                 case "M" -> md5 != null ? md5 : (client != null && fileInfo != null
-                        ? client.computeMd5(fileInfo.fullPath()) : null);
+                        ? safeComputeMd5(client, fileInfo.fullPath()) : null);
                 case "C" -> count;
                 case "N" -> LocalDateTime.now().format(DT_FMT);
                 case "D" -> LocalDateTime.now().format(D_FMT);
@@ -454,6 +459,19 @@ public class FlagFileService {
                 case "P" -> fileInfo != null ? fileInfo.fullPath() : null;
                 default -> null; // 非模式码，原样保留
             };
+        }
+
+        // 安全辅助方法：将 checked IOException 转为 unchecked RuntimeException
+        private String safeCountFileLines(FtpClient client, String path) {
+            try { return String.valueOf(client.countFileLines(path)); }
+            catch (IOException e) { throw new RuntimeException(e); }
+        }
+        private String safeGetFileSize(FtpClient client, String path) {
+            try { return String.valueOf(client.getFileSize(path)); }
+            catch (IOException e) { throw new RuntimeException(e); }
+        }
+        private String safeComputeMd5(FtpClient client, String path) {
+            return client.computeMd5(path);
         }
     }
 

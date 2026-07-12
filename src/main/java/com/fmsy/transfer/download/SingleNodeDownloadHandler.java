@@ -49,6 +49,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
     private final IntFunction<ExecutorService> batchExecutorFactory;
     private final DownloadSupport support;
     private final TransferSupport transferSupport;
+    private final ConverterFactory converterFactory;
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
@@ -81,7 +82,8 @@ public class SingleNodeDownloadHandler implements TransferHandler {
 
         // ===== Phase 2: SERIAL 模式顶层 pre-audit =====
         if (commandType != CommandType.BATCH && command.getAuditCount() != null && command.getAuditCount() >= 0) {
-            if (!support.preAudit(config, command.getAuditCount())) {
+            int auditResult = support.preAudit(config, command.getAuditCount());
+            if (auditResult < 0) {
                 result.setOutcome(0, determineMainStatus(false, 0, 1), "Pre-audit failed");
                 return;
             }
@@ -204,7 +206,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         // Phase 2: FTP operations (borrow client just before use)
         FtpClient client = ftpPool.getClient(config.getFtpName());
         try {
-            var converter = ConverterFactory.get(config.getParserType());
+            var converter = converterFactory.get(config.getParserType());
             var mapping = fieldMappingBuilder.buildForDownload(config);
             try (var data = targetTableRepository.streamBucketData(
                     config.getDbName(), config.getTableName(), config.getSplitFields(), fieldValue);

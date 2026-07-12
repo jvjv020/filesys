@@ -37,7 +37,7 @@ public final class FilePathUtils {
     }
 
     /** 验证路径是否安全（防止路径遍历攻击） */
-    private static void validatePath(String path) {
+    public static void validatePath(String path) {
         if (path == null) {
             throw new IllegalArgumentException("Path cannot be null");
         }

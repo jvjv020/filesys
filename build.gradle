@@ -16,6 +16,8 @@ repositories {
 }
 
 dependencies {
+    implementation platform('org.springframework.boot:spring-boot-dependencies:3.2.5')
+
     implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter'
 
@@ -28,21 +30,24 @@ dependencies {
     implementation 'org.slf4j:slf4j-api'
     runtimeOnly 'ch.qos.logback:logback-classic'
 
-    compileOnly 'org.projectlombok:lombok'
-    annotationProcessor 'org.projectlombok:lombok'
+    compileOnly 'org.projectlombok:lombok:1.18.30'
+    annotationProcessor 'org.projectlombok:lombok:1.18.30'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testImplementation 'org.mockito:mockito-core'
+    testImplementation 'org.mockito:mockito-junit-jupiter'
 }
 
-// 测试模块已禁用 - 本地环境无测试条件,Phase 1 重构后所有 *Test.java 不再纳入构建
-// (项目根目录的 src/test/ 目录仍存在,待用户手动删除)
 sourceSets {
     test {
-        java.srcDirs = []
-        resources.srcDirs = []
+        java.srcDirs = ['src/test/java']
+        resources.srcDirs = ['src/test/resources']
     }
 }
 
-tasks.named('test') {
-    enabled = false
+test {
+    useJUnitPlatform()
 }
 
 tasks.named('bootJar') {

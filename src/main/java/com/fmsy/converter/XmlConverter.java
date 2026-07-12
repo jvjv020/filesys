@@ -22,6 +22,7 @@ import org.xml.sax.SAXException;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
@@ -181,11 +182,11 @@ public class XmlConverter implements FileConverter {
         Map<String, String> cfg = ConverterUtils.mergeConfig(getDefaultConfig(), mapping);
         XmlExternalConfigResolver.XmlProfile profile = XmlExternalConfigResolver.INSTANCE.resolve(mapping, cfg);
         try {
-            XMLStreamWriter writer = XMLOutputFactory.newInstance().createXMLStreamWriter(output, profile.encoding());
-            writer.writeEndElement();
-            writer.writeEndDocument();
-            writer.flush();
-        } catch (XMLStreamException e) {
+            // 注意:writeHeader/writeDataRecords 已各自创建并关闭了 XMLStreamWriter,
+            // 此处不能再创建新 writer(无对应 startElement 状态),直接写原始关闭标签。
+            output.write(("</" + profile.rootElement() + ">\n").getBytes(profile.encoding()));
+            output.flush();
+        } catch (IOException e) {
             throw new RuntimeException("Failed to write XML footer", e);
         }
     }

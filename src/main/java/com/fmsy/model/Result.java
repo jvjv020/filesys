@@ -158,7 +158,7 @@ public class Result {
      */
     public void failWith(Exception e) {
         this.result = ColumnNames.STATUS_ERROR;
-        this.description = e.getMessage() != null ? e.getMessage() : "";
+        this.description = e != null ? (e.getMessage() != null ? e.getMessage() : "") : "";
     }
 
     /**

@@ -52,6 +52,7 @@ public class MultiUploadHandler implements TransferHandler {
     private final TransferSupport transferSupport;
     private final FtpPool ftpPool;
     private final IntFunction<ExecutorService> batchExecutorFactory;
+    private final ConverterFactory converterFactory;
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
@@ -127,8 +128,9 @@ public class MultiUploadHandler implements TransferHandler {
         }
 
         // Phase 3: postProcess
+        int finalTotalRecords = totalRecords;
         transferSupport.executeWithClient(ftpName, client -> {
-            transferSupport.postProcess(client, config, dirInfo, totalRecords);
+            transferSupport.postProcess(client, config, dirInfo, finalTotalRecords);
             return null;
         });
 
@@ -204,8 +206,10 @@ public class MultiUploadHandler implements TransferHandler {
         }
 
         // Phase 3 (FTP): postProcess
+        ResolvedPath finalLastFileInfo = lastFileInfo;
+        int finalTotalRecords = totalRecords;
         transferSupport.executeWithClient(ftpName, client -> {
-            transferSupport.postProcess(client, config, lastFileInfo, totalRecords);
+            transferSupport.postProcess(client, config, finalLastFileInfo, finalTotalRecords);
             return null;
         });
 
@@ -216,7 +220,7 @@ public class MultiUploadHandler implements TransferHandler {
 
     private UploadSupport.UploadResult processOneDetail(Command command, TransferConfig config,
                                                         Map<String, Object> detail,
-                                                        String nodeId, boolean truncateFirst) {
+                                                        String nodeId, boolean truncateFirst) throws Exception {
         Long detailId = ((Number) detail.get(ColumnNames.DETAIL_ID)).longValue();
         String fileName = (String) detail.get(ColumnNames.FILE_NAME);
 
@@ -229,7 +233,7 @@ public class MultiUploadHandler implements TransferHandler {
 
         Integer detailAuditCount = detail.get(ColumnNames.AUDIT_COUNT) != null
                 ? ((Number) detail.get(ColumnNames.AUDIT_COUNT)).intValue() : -1;
-        FileConverter converter = ConverterFactory.get(config.getParserType());
+        FileConverter converter = converterFactory.get(config.getParserType());
         int fileLineCount = support.preAudit(detailAuditCount, config, fileInfo.fullPath(), converter);
         if (fileLineCount < 0) {
             detailRepository.updateStatus(detailId, ColumnNames.STATUS_ERROR, nodeId);
@@ -325,7 +329,7 @@ public class MultiUploadHandler implements TransferHandler {
                     return SKIP;
                 }
 
-                FileConverter converter = ConverterFactory.get(config.getParserType());
+                FileConverter converter = converterFactory.get(config.getParserType());
                 int fileLineCount = support.preAudit(command.getAuditCount(), config, filePath, converter);
                 if (fileLineCount < 0) {
                     log.warn("Pre-audit failed for file: {}", filePath);

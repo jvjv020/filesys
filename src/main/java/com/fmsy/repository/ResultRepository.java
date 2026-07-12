@@ -78,7 +78,7 @@ public class ResultRepository {
      */
     public void insertSimple(Long commandId, String categoryCode, String controlCode,
                              String result, String description, String dbName) {
-        JdbcTemplateWrapper jdbc = getJdbc(dbName != null ? dbName : ColumnNames.DEFAULT_DB);
+        JdbcTemplateWrapper jdbc = getJdbc(dbName != null && !dbName.isEmpty() ? dbName : ColumnNames.DEFAULT_DB);
         jdbc.update(SQL_INSERT_SIMPLE, commandId, categoryCode, controlCode, result,
                 description, LocalDate.now());
         log.info("Wrote simple result for command: {}", commandId);

@@ -84,6 +84,7 @@ public class DetailPollingService {
     private final FieldMappingBuilder fieldMappingBuilder;
     private final AuditService auditService;
     private final ResultRepository resultRepository;
+    private final ConverterFactory converterFactory;
     /** 每子命令独立的批处理线程池工厂 */
     private final IntFunction<ExecutorService> batchExecutorFactory;
     /** 关闭服务(轮询期间检查是否正在关闭) */
@@ -366,7 +367,7 @@ public class DetailPollingService {
                 client.mkdirs(parentDir);
             }
 
-            FileConverter converter = ConverterFactory.get(config.getParserType());
+            FileConverter converter = converterFactory.get(config.getParserType());
             FieldMapping mapping = fieldMappingBuilder.buildForDownload(config);
 
             try (var data = targetTableRepository.streamBucketData(
