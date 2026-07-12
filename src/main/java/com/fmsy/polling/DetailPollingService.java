@@ -1,16 +1,7 @@
 package com.fmsy.polling;
 
-import com.fmsy.audit.AuditScenario;
-import com.fmsy.audit.AuditService;
 import com.fmsy.config.AppConfig;
-import com.fmsy.converter.ConverterFactory;
-import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.CommandType;
-import com.fmsy.model.FieldMapping;
-import com.fmsy.enums.EmptyDataHandling;
-import com.fmsy.fileops.FlagFileService;
-import com.fmsy.ftp.FtpClient;
-import com.fmsy.ftp.FtpPool;
 import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.lifecycle.ShutdownService;
 import com.fmsy.model.Command;
@@ -20,20 +11,17 @@ import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.ResultRepository;
-import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.BucketDistributor;
-import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TempTransferConfigFactory;
 import com.fmsy.transfer.TransferSupport;
+import com.fmsy.transfer.download.DownloadSupport;
 import com.fmsy.util.ColumnNames;
-import com.fmsy.util.FilePathUtils;
 import com.fmsy.util.LogUtils;
 import com.fmsy.util.ResolvedPath;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.io.OutputStream;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -52,20 +40,13 @@ import java.util.function.IntFunction;
  *
  * 处理流程（针对每个桶）：
  * 1. 竞争桶的处理权
- * 2. 前置检查（READY/FLAG文件）
- * 3. 预审计（按明细表的auditCount验证）
- * 4. 空数据处理
- * 5. 查询该桶数据，生成文件到FTP
- * 6. 后置处理（GENERATE_SUB_FLAG等）
- * 7. 后审计
- * 8. 更新明细状态
+ * 2. 通过 {@link com.fmsy.transfer.download.DownloadSupport#executePipeline} 执行单文件下载管线：
+ *    前置检查 → 预审计 → 空数据处理 → 文件生成 → 后审计 → 后操作(SUB标志)
  *
  * 线程模型：
  * - 每次 pollAndProcess 调用创建一个新的 ExecutorService
  * - 每个桶独立 Runnable 提交到该池,主线程 awaitTermination 等所有桶完成
  * - 与 PollingService 批次隔离原则一致:同一子命令的所有桶共享本池,与之前/之后子命令的桶不共用
- *
- * <p>Phase 1 重构:SQL 访问委托给 DetailRepository / TargetTableRepository。
  */
 @Slf4j
 @Service
@@ -73,18 +54,14 @@ import java.util.function.IntFunction;
 public class DetailPollingService {
 
     private final DetailRepository detailRepository;
-    private final TargetTableRepository targetTableRepository;
     private final BucketDistributor bucketDistributor;
     private final ConfigLoaderService configLoader;
     private final CommandRepository commandRepository;
     private final TempTransferConfigFactory tempConfigFactory;
     private final AppConfig appConfig;
-    private final FtpPool ftpPool;
     private final TransferSupport transferSupport;
-    private final FieldMappingBuilder fieldMappingBuilder;
-    private final AuditService auditService;
     private final ResultRepository resultRepository;
-    private final ConverterFactory converterFactory;
+    private final DownloadSupport downloadSupport;
     /** 每子命令独立的批处理线程池工厂 */
     private final IntFunction<ExecutorService> batchExecutorFactory;
     /** 关闭服务(轮询期间检查是否正在关闭) */
@@ -153,7 +130,8 @@ public class DetailPollingService {
                 bucketExecutor = batchExecutorFactory.apply(buckets.size());
                 for (Detail bucket : buckets) {
                     TransferConfig bucketConfig = sharedConfig;
-                    bucketExecutor.execute(() -> runOneBucket(bucket, nodeId, bucketConfig, successCount, failedCount, skippedCount));
+                    bucketExecutor.execute(() -> runOneBucket(bucket, nodeId, bucketConfig,
+                            successCount, failedCount, skippedCount));
                 }
                 bucketExecutor.shutdown();
                 if (!bucketExecutor.awaitTermination(1, java.util.concurrent.TimeUnit.HOURS)) {
@@ -282,7 +260,12 @@ public class DetailPollingService {
         return ColumnNames.STATUS_SUCCESS;
     }
 
-    /** 处理单个桶的数据,返回处理结果(供外层汇总) */
+    /**
+     * 处理单个桶 — 委托 {@link DownloadSupport#executePipeline} 执行单文件下载管线。
+     *
+     * <p>管线内部处理 preCheck + mkdirs → 前稽核 → 空数据处理 → 文件生成 →
+     * SUB 后操作 → 后稽核 → Detail 状态更新。
+     */
     private BucketOutcome processBucket(Detail bucket, String nodeId, TransferConfig config) {
         if (config == null) {
             log.warn("No config found for bucket: {}, category={}, control={}",
@@ -291,124 +274,37 @@ public class DetailPollingService {
             return BucketOutcome.FAILED;
         }
 
-        // Phase 1: DB-only checks (no FTP client held)
-        int recordCount = phase1DbChecks(bucket, nodeId, config);
-        if (recordCount < 0) {
-            return recordCount == -2 ? BucketOutcome.FAILED : BucketOutcome.SKIPPED;
-        }
-
+        // 解析目标文件路径
         Map<String, String> bucketContext = transferSupport.buildContext(
                 null, config.getSplitFields(), bucket.getFieldValue());
         ResolvedPath fileInfo = transferSupport.resolveFilePath(config.getFilePath(), bucketContext);
 
-        // Phase 2: FTP data transfer
-        long startTime = System.currentTimeMillis();
-        BucketOutcome outcome = phase2FtpTransfer(bucket, config, fileInfo, recordCount, nodeId);
-        if (outcome != BucketOutcome.SUCCESS) {
-            return outcome;
+        // 构建管线选项:分桶模式,开启前操作和后稽核,仅 SUB 后操作
+        DownloadSupport.PipelineOptions opts = DownloadSupport.PipelineOptions.builder()
+                .wholeTable(false)
+                .fieldValue(bucket.getFieldValue())
+                .expectedAuditCount(bucket.getAuditCount())
+                .enablePreCheck(true)
+                .enableOverwriteCheck(false)
+                .enablePostAudit(true)
+                .postOpsFilter("SUB")
+                .detail(bucket)
+                .nodeId(nodeId)
+                .build();
+
+        DownloadSupport.PipelineResult pr = downloadSupport.executePipeline(
+                config.getFtpName(), config, fileInfo, opts);
+
+        // 映射管线结果到 BucketOutcome
+        if (pr.isSuccess()) {
+            log.info("Bucket processed successfully: detailId={}, fieldValue={}, filePath={}, records={}, nodeId={}",
+                    bucket.getId(), bucket.getFieldValue(), fileInfo.fullPath(), pr.getRecordCount(), nodeId);
+            return BucketOutcome.SUCCESS;
         }
-
-        // Phase 3: post-audit + status update
-        return phase3PostAudit(bucket, config, fileInfo, recordCount, startTime, nodeId);
-    }
-
-    /**
-     * Phase 1 — DB-only 检查:配置校验、预审计、空数据处理。
-     * @return ≥0 记录数(通过); -1 跳过(SKIPPED); -2 失败(FAILED)
-     */
-    private int phase1DbChecks(Detail bucket, String nodeId, TransferConfig config) {
-        String splitFields = config.getSplitFields();
-        int recordCount = -1;
-        Integer detailAuditCount = bucket.getAuditCount();
-        if (detailAuditCount != null && detailAuditCount >= 0) {
-            recordCount = auditService.preAuditByBucket(
-                    config.getTableName(), splitFields, bucket.getFieldValue(), detailAuditCount, config.getDbName());
-            if (recordCount < 0) {
-                log.error("Pre-audit failed for bucket: {}", bucket.getId());
-                detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_SKIPPED, nodeId);
-                return -1;
-            }
+        if (ColumnNames.STATUS_SKIPPED.equals(pr.getStatus())) {
+            return BucketOutcome.SKIPPED;
         }
-        if (recordCount < 0) {
-            recordCount = targetTableRepository.countByBucket(
-                    config.getDbName(), config.getTableName(), splitFields, bucket.getFieldValue());
-        }
-
-        EmptyDataHandling emptyHandling = config.getEmptyDataHandling();
-        if (!transferSupport.handleEmptyData(recordCount, emptyHandling)) {
-            log.warn("Empty data handling for bucket: {}", bucket.getFieldValue());
-            if (emptyHandling == EmptyDataHandling.ERROR) {
-                detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_ERROR, nodeId);
-                return -2;
-            } else {
-                detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_SKIPPED, nodeId);
-                return -1;
-            }
-        }
-        return recordCount;
-    }
-
-    /**
-     * Phase 2 — FTP 传输:前置检查 → 目录创建 → 文件生成 → sub-flag。
-     * @return SUCCESS 或 FAILED
-     */
-    private BucketOutcome phase2FtpTransfer(Detail bucket, TransferConfig config,
-                                            ResolvedPath fileInfo, int recordCount, String nodeId) {
-        FtpClient client = ftpPool.getClient(config.getFtpName());
-        try {
-            if (!transferSupport.preCheck(client, config, fileInfo)) {
-                log.error("Pre-check failed for bucket: {}", bucket.getId());
-                detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_SKIPPED, nodeId);
-                return BucketOutcome.SKIPPED;
-            }
-
-            String parentDir = FilePathUtils.extractParentDirectory(fileInfo.fullPath());
-            if (parentDir != null && !parentDir.isEmpty()) {
-                client.mkdirs(parentDir);
-            }
-
-            FileConverter converter = converterFactory.get(config.getParserType());
-            FieldMapping mapping = fieldMappingBuilder.buildForDownload(config);
-
-            try (var data = targetTableRepository.streamBucketData(
-                    config.getDbName(), config.getTableName(), config.getSplitFields(), bucket.getFieldValue());
-                 OutputStream os = client.getOutputStream(fileInfo.fullPath())) {
-                converter.generate(os, data, mapping);
-                client.completePendingCommand();
-            }
-            log.info("Generated file for bucket: {}, path: {}, records: {}",
-                    bucket.getId(), fileInfo.fullPath(), recordCount);
-
-            String subFlagOnly = FlagFileService.filterOpsByType(
-                    config.getPostOperations(), "SUB");
-            if (subFlagOnly != null) {
-                transferSupport.postProcess(client, subFlagOnly, fileInfo, recordCount);
-            }
-        } catch (Exception e) {
-            log.error("Failed to process bucket: {}", bucket.getId(), e);
-            detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_ERROR, nodeId);
-            return BucketOutcome.FAILED;
-        } finally {
-            client.close();
-        }
-        return BucketOutcome.SUCCESS;
-    }
-
-    /**
-     * Phase 3 — 后审计 + 状态更新。
-     */
-    private BucketOutcome phase3PostAudit(Detail bucket, TransferConfig config,
-                                          ResolvedPath fileInfo, int recordCount,
-                                          long startTime, String nodeId) {
-        auditService.postAudit(AuditScenario.DOWNLOAD, config.getFtpName(),
-                config.getTableName(), fileInfo.fullPath(), -1, config.getDbName());
-
-        long durationMs = System.currentTimeMillis() - startTime;
-        log.info("Bucket processed successfully: detailId={}, fieldValue={}, filePath={}, records={}, durationMs={}, nodeId={}",
-                bucket.getId(), bucket.getFieldValue(), fileInfo.fullPath(), recordCount, durationMs, nodeId);
-
-        detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_SUCCESS, nodeId);
-        return BucketOutcome.SUCCESS;
+        return BucketOutcome.FAILED;
     }
 
 }

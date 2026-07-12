@@ -1,30 +1,22 @@
 package com.fmsy.polling;
 
-import com.fmsy.audit.AuditService;
 import com.fmsy.config.AppConfig;
-import com.fmsy.converter.ConverterFactory;
-import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.CommandType;
 import com.fmsy.enums.EmptyDataHandling;
-import com.fmsy.enums.TransferScenario;
-import com.fmsy.fileops.FlagFileService;
-import com.fmsy.ftp.FtpClient;
-import com.fmsy.ftp.FtpPool;
 import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.lifecycle.ShutdownService;
 import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
-import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.ResultRepository;
-import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.BucketDistributor;
-import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TempTransferConfigFactory;
 import com.fmsy.transfer.TransferSupport;
+import com.fmsy.transfer.download.DownloadSupport;
+import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -36,10 +28,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -50,12 +40,7 @@ import java.util.function.IntFunction;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-// Additional imports needed for streaming and captors
 import org.mockito.ArgumentCaptor;
-import com.fmsy.repository.TargetTableRepository;
-
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -64,9 +49,6 @@ class DetailPollingServiceTest {
 
     @Mock
     private DetailRepository detailRepository;
-
-    @Mock
-    private TargetTableRepository targetTableRepository;
 
     @Mock
     private BucketDistributor bucketDistributor;
@@ -90,22 +72,13 @@ class DetailPollingServiceTest {
     private AppConfig.Polling pollingConfig;
 
     @Mock
-    private FtpPool ftpPool;
-
-    @Mock
     private TransferSupport transferSupport;
-
-    @Mock
-    private FieldMappingBuilder fieldMappingBuilder;
-
-    @Mock
-    private AuditService auditService;
 
     @Mock
     private ResultRepository resultRepository;
 
     @Mock
-    private ConverterFactory converterFactory;
+    private DownloadSupport downloadSupport;
 
     @Mock
     private IntFunction<ExecutorService> batchExecutorFactory;
@@ -127,10 +100,9 @@ class DetailPollingServiceTest {
         when(pollingConfig.getTaskTimeoutHours()).thenReturn(1);
 
         detailPollingService = new DetailPollingService(
-                detailRepository, targetTableRepository, bucketDistributor,
+                detailRepository, bucketDistributor,
                 configLoader, commandRepository, tempConfigFactory,
-                appConfig, ftpPool, transferSupport, fieldMappingBuilder,
-                auditService, resultRepository, converterFactory,
+                appConfig, transferSupport, resultRepository, downloadSupport,
                 batchExecutorFactory, shutdownService);
     }
 
@@ -146,7 +118,6 @@ class DetailPollingServiceTest {
 
     private TransferConfig createDownloadConfig() {
         TransferConfig config = new TransferConfig();
-        config.setScenario(TransferScenario.DOWNLOAD_SINGLE_NODE);
         config.setFtpName("ftp1");
         config.setFilePath("/data/export/{field}.csv");
         config.setDbName("DB1");
@@ -247,39 +218,28 @@ class DetailPollingServiceTest {
                     .thenReturn(new ArrayList<>());
 
             when(batchExecutorFactory.apply(1)).thenReturn(mockExecutor);
+            doAnswer(invocation -> {
+                ((Runnable) invocation.getArgument(0)).run();
+                return null;
+            }).when(mockExecutor).execute(any(Runnable.class));
             when(mockExecutor.awaitTermination(1, TimeUnit.HOURS)).thenReturn(true);
 
             // Mock bucket competition to succeed
             when(bucketDistributor.competeBucket(1L, "node1")).thenReturn(1);
-            // Mock pre-audit
-            when(auditService.preAuditByBucket("my_table", "region", "region1", 10, "DB1")).thenReturn(10);
-            // Mock empty data handling
-            when(transferSupport.handleEmptyData(10, EmptyDataHandling.SKIP)).thenReturn(true);
             // Mock resolveFilePath
             ResolvedPath resolvedPath = ResolvedPath.of("/data/export/region1.csv");
             Map<String, String> context = new HashMap<>();
             when(transferSupport.buildContext(null, "region", "region1")).thenReturn(context);
             when(transferSupport.resolveFilePath(config.getFilePath(), context)).thenReturn(resolvedPath);
 
-            // Mock FTP
-            FtpClient ftpClient = mock(FtpClient.class);
-            when(ftpPool.getClient("ftp1")).thenReturn(ftpClient);
-            when(ftpClient.getOutputStream(anyString())).thenReturn(mock(OutputStream.class));
-
-            // Mock pre-check
-            when(transferSupport.preCheck(ftpClient, config, resolvedPath)).thenReturn(true);
-            // Mock converter
-            FileConverter converter = mock(FileConverter.class);
-            when(converterFactory.get("CSV")).thenReturn(converter);
-            // Mock field mapping
-            FieldMapping mapping = mock(FieldMapping.class);
-            when(fieldMappingBuilder.buildForDownload(config)).thenReturn(mapping);
-            // Mock stream
-            when(targetTableRepository.streamBucketData("DB1", "my_table", "region", "region1"))
-                    .thenReturn(mock(TargetTableRepository.DataStream.class));
+            // Mock download pipeline to return success
+            when(downloadSupport.executePipeline(eq("ftp1"), eq(config), eq(resolvedPath), any()))
+                    .thenReturn(new DownloadSupport.PipelineResult(
+                            10, true, ColumnNames.STATUS_SUCCESS, "/data/export/region1.csv"));
 
             detailPollingService.pollAndProcess("node1", "100", subCmd);
 
+            verify(downloadSupport).executePipeline(eq("ftp1"), eq(config), eq(resolvedPath), any());
             verify(detailRepository, atLeast(1)).findReadyBuckets(100L, 3);
         }
 

@@ -1,18 +1,12 @@
 package com.fmsy.transfer.download;
 
-import com.fmsy.converter.ConverterFactory;
 import com.fmsy.enums.CommandType;
-import com.fmsy.enums.EmptyDataHandling;
 import com.fmsy.fileops.FlagFileService;
-import com.fmsy.ftp.FtpClient;
-import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
-import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.BucketDistributor;
-import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
 import static com.fmsy.transfer.TransferSupport.determineMainStatus;
@@ -23,7 +17,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -36,20 +29,19 @@ import java.util.function.IntFunction;
 
 /**
  * DOWNLOAD_SINGLE_NODE 场景:按拆分字段分桶,每个桶生成一个文件,并行下载到同一节点 FTP。
+ *
+ * <p>桶的并行处理委托 {@link DownloadSupport#executePipeline} 执行单文件管线,
+ * Handler 负责顶层 preCheck、分桶、总标志文件和聚合后稽核。
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class SingleNodeDownloadHandler implements TransferHandler {
 
-    private final FtpPool ftpPool;
+    private final DownloadSupport downloadSupport;
     private final BucketDistributor bucketDistributor;
-    private final TargetTableRepository targetTableRepository;
-    private final FieldMappingBuilder fieldMappingBuilder;
-    private final IntFunction<ExecutorService> batchExecutorFactory;
-    private final DownloadSupport support;
     private final TransferSupport transferSupport;
-    private final ConverterFactory converterFactory;
+    private final IntFunction<ExecutorService> batchExecutorFactory;
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
@@ -65,8 +57,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         }
         String postOps = config.getPostOperations();
 
-        ResolvedPath baseFileInfo;
-        baseFileInfo = transferSupport.resolveFilePath(config.getFilePath(), command);
+        ResolvedPath baseFileInfo = transferSupport.resolveFilePath(config.getFilePath(), command);
         boolean preCheckOk = transferSupport.executeWithClient(config.getFtpName(), client -> {
             if (!transferSupport.preCheck(client, config, baseFileInfo)) {
                 result.setOutcome(0, determineMainStatus(false, 0, 1), "Pre-check failed");
@@ -82,7 +73,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
 
         // ===== Phase 2: SERIAL 模式顶层 pre-audit =====
         if (commandType != CommandType.BATCH && command.getAuditCount() != null && command.getAuditCount() >= 0) {
-            int auditResult = support.preAudit(config, command.getAuditCount());
+            int auditResult = downloadSupport.preAudit(config, command.getAuditCount());
             if (auditResult < 0) {
                 result.setOutcome(0, determineMainStatus(false, 0, 1), "Pre-audit failed");
                 return;
@@ -106,12 +97,13 @@ public class SingleNodeDownloadHandler implements TransferHandler {
             }
         }
 
-    // ===== Phase 4: 并行桶处理 =====
+        // ===== Phase 4: 并行桶处理(每桶通过管线执行) =====
         BucketResult bucketResult = new BucketResult();
         ConcurrentLinkedQueue<String> generatedFiles = new ConcurrentLinkedQueue<>();
 
         int concurrency = config.getConcurrency() != null ? config.getConcurrency() : 3;
-        ExecutorService bucketExecutor = batchExecutorFactory.apply(Math.max(1, Math.min(buckets.size(), concurrency)));
+        ExecutorService bucketExecutor = batchExecutorFactory.apply(
+                Math.max(1, Math.min(buckets.size(), concurrency)));
         try {
             for (Detail bucket : buckets) {
                 bucketExecutor.execute(() -> processBucketParallel(
@@ -133,8 +125,9 @@ public class SingleNodeDownloadHandler implements TransferHandler {
             }
         }
 
+        // ===== Phase 6: 聚合后稽核 =====
         if (command.getAuditCount() != null && command.getAuditCount() >= 0) {
-            boolean postAuditOk = support.postAudit(config, baseFileInfo.fullPath());
+            boolean postAuditOk = downloadSupport.postAudit(config, baseFileInfo.fullPath());
             if (!postAuditOk) {
                 log.error("Post-audit failed for command {}, rolling back {} generated file(s)",
                         command.getId(), generatedFiles.size());
@@ -176,7 +169,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
     }
 
     /**
-     * 并行处理单个桶(bucketExecutor 线程池线程中执行)
+     * 并行处理单个桶 — 委托 {@link DownloadSupport#executePipeline} 执行单文件下载管线。
      */
     private void processBucketParallel(Detail bucket, Command command, TransferConfig config,
                                         ResolvedPath baseFileInfo,
@@ -184,76 +177,43 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         String fieldValue = bucket.getFieldValue();
         Map<String, String> context = transferSupport.buildContext(
                 null, config.getSplitFields(), fieldValue);
-        // baseFileInfo.fullPath() 已经包含日期等占位符的解析结果，
-        // 这里只需用分桶字段值做二次替换，产出每个桶的目标路径
         ResolvedPath targetFileInfo = transferSupport.resolveFilePath(
                 baseFileInfo.fullPath(), context);
 
-        // Phase 1: DB-only checks (no FTP client held)
-        int recordCount = resolveBucketRecordCount(command, config, bucket, fieldValue);
-        if (recordCount < 0) {
-            markBucketFailed(result, bucket, config);
-            return;
-        }
-
-        if (!transferSupport.handleEmptyData(recordCount, config.getEmptyDataHandling())) {
-            boolean isError = config.getEmptyDataHandling() == EmptyDataHandling.ERROR;
-            markBucketFailed(result, bucket, config, isError);
-            if (!isError) result.skippedCount.incrementAndGet();
-            return;
-        }
-
-        // Phase 2: FTP operations (borrow client just before use)
-        FtpClient client = ftpPool.getClient(config.getFtpName());
-        try {
-            var converter = converterFactory.get(config.getParserType());
-            var mapping = fieldMappingBuilder.buildForDownload(config);
-            try (var data = targetTableRepository.streamBucketData(
-                    config.getDbName(), config.getTableName(), config.getSplitFields(), fieldValue);
-                 OutputStream os = client.getOutputStream(targetFileInfo.fullPath())) {
-                converter.generate(os, data, mapping);
-                client.completePendingCommand();
-            }
-            generatedFiles.add(targetFileInfo.fullPath());
-
-            // 每桶 sub-flag
-            String subFlagOnly = FlagFileService.filterOpsByType(config.getPostOperations(), "SUB");
-            transferSupport.postProcess(client, subFlagOnly, targetFileInfo, recordCount);
-
-            support.updateDetailStatusForBucket(bucket, ColumnNames.STATUS_SUCCESS, config.getNodeId());
-            log.info("Downloaded file for bucket value: {}", fieldValue);
-            result.totalRecordCount.addAndGet(recordCount);
-        } catch (Exception e) {
-            log.error("Bucket processing crashed: {}", fieldValue, e);
-            markBucketFailed(result, bucket, config);
-        } finally {
-            client.close();
-        }
-    }
-
-    /**
-     * 解析桶的记录数:优先从 preAudit 获取，避免二次 countByBucket。
-     * @return 记录数（≥0），-1 表示审计失败
-     */
-    private int resolveBucketRecordCount(Command command, TransferConfig config, Detail bucket, String fieldValue) {
+        // 确定预期稽核数:BATCH 模式用明细表的 auditCount,SERIAL 模式无每桶稽核
+        Integer auditCount = null;
         if (command.getCommandType() == CommandType.BATCH) {
-            Integer detailAuditCount = bucket.getAuditCount();
-            if (detailAuditCount != null && detailAuditCount >= 0) {
-                return support.preAuditByBucket(config, detailAuditCount, fieldValue);
+            Integer detailAudit = bucket.getAuditCount();
+            if (detailAudit != null && detailAudit >= 0) {
+                auditCount = detailAudit;
             }
         }
-        return targetTableRepository.countByBucket(
-                config.getDbName(), config.getTableName(), config.getSplitFields(), fieldValue);
-    }
 
-    private void markBucketFailed(BucketResult result, Detail bucket, TransferConfig config) {
-        markBucketFailed(result, bucket, config, true);
-    }
+        DownloadSupport.PipelineOptions opts = DownloadSupport.PipelineOptions.builder()
+                .wholeTable(false)
+                .fieldValue(fieldValue)
+                .expectedAuditCount(auditCount)
+                .enablePreCheck(false)       // 顶层已做
+                .enableOverwriteCheck(false)
+                .enablePostAudit(false)      // 聚合层做
+                .postOpsFilter("SUB")       // 仅生成子标志文件
+                .detail(bucket)
+                .nodeId(config.getNodeId())
+                .build();
 
-    private void markBucketFailed(BucketResult result, Detail bucket, TransferConfig config, boolean isError) {
-        result.allSuccess.set(false);
-        if (isError) result.failedCount.incrementAndGet();
-        support.updateDetailStatusForBucket(bucket,
-                isError ? ColumnNames.STATUS_ERROR : ColumnNames.STATUS_SKIPPED, config.getNodeId());
+        DownloadSupport.PipelineResult pr = downloadSupport.executePipeline(
+                config.getFtpName(), config, targetFileInfo, opts);
+
+        if (pr.isSuccess()) {
+            generatedFiles.add(targetFileInfo.fullPath());
+            result.totalRecordCount.addAndGet(pr.getRecordCount());
+        } else {
+            result.allSuccess.set(false);
+            if (ColumnNames.STATUS_SKIPPED.equals(pr.getStatus())) {
+                result.skippedCount.incrementAndGet();
+            } else {
+                result.failedCount.incrementAndGet();
+            }
+        }
     }
 }

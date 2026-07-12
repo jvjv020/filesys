@@ -1,19 +1,13 @@
 package com.fmsy.transfer.download;
 
-import com.fmsy.converter.ConverterFactory;
-import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.CommandType;
 import com.fmsy.fileops.FlagFileService;
-import com.fmsy.ftp.FtpClient;
-import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
-import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
-import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.BucketDistributor;
-import com.fmsy.transfer.FieldMappingBuilder;
+import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
@@ -27,7 +21,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
-import java.io.OutputStream;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -43,31 +36,13 @@ import static org.mockito.Mockito.*;
 class SingleNodeDownloadHandlerTest {
 
     @Mock
-    private FtpPool ftpPool;
-
-    @Mock
     private BucketDistributor bucketDistributor;
-
-    @Mock
-    private TargetTableRepository targetTableRepository;
-
-    @Mock
-    private FieldMappingBuilder fieldMappingBuilder;
 
     @Mock
     private DownloadSupport downloadSupport;
 
     @Mock
     private TransferSupport transferSupport;
-
-    @Mock
-    private ConverterFactory converterFactory;
-
-    @Mock
-    private FtpClient ftpClient;
-
-    @Mock
-    private FileConverter fileConverter;
 
     private IntFunction<ExecutorService> batchExecutorFactory;
     private SingleNodeDownloadHandler handler;
@@ -80,9 +55,8 @@ class SingleNodeDownloadHandlerTest {
     @BeforeEach
     void setUp() {
         batchExecutorFactory = size -> Executors.newFixedThreadPool(size);
-        handler = new SingleNodeDownloadHandler(ftpPool, bucketDistributor,
-                targetTableRepository, fieldMappingBuilder,
-                batchExecutorFactory, downloadSupport, transferSupport, converterFactory);
+        handler = new SingleNodeDownloadHandler(downloadSupport, bucketDistributor,
+                transferSupport, batchExecutorFactory);
 
         command = new Command();
         command.setId(1L);
@@ -102,6 +76,16 @@ class SingleNodeDownloadHandlerTest {
 
         result = new Result();
         baseFileInfo = ResolvedPath.of("/data/output_{REGION}.csv");
+    }
+
+    private void mockPreCheckSuccess() throws Exception {
+        when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(baseFileInfo);
+        when(transferSupport.executeWithClient(eq("ftp1"), any()))
+                .thenAnswer(invocation -> {
+                    TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                    return cb.run(mock(com.fmsy.ftp.FtpClient.class));
+                });
+        when(transferSupport.preCheck(any(), eq(config), eq(baseFileInfo))).thenReturn(true);
     }
 
     @Nested
@@ -125,20 +109,17 @@ class SingleNodeDownloadHandlerTest {
     @DisplayName("handle - pre-check failure")
     class HandlePreCheckFailure {
 
-        @BeforeEach
-        void setup() throws Exception {
+        @Test
+        @DisplayName("should set outcome when pre-check fails")
+        void shouldSetOutcomeWhenPreCheckFails() throws Exception {
             when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(baseFileInfo);
             when(transferSupport.executeWithClient(eq("ftp1"), any()))
                     .thenAnswer(invocation -> {
                         TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
-                        return cb.run(ftpClient);
+                        return cb.run(mock(com.fmsy.ftp.FtpClient.class));
                     });
-            when(transferSupport.preCheck(ftpClient, config, baseFileInfo)).thenReturn(false);
-        }
+            when(transferSupport.preCheck(any(), eq(config), eq(baseFileInfo))).thenReturn(false);
 
-        @Test
-        @DisplayName("should set outcome when pre-check fails")
-        void shouldSetOutcomeWhenPreCheckFails() throws Exception {
             handler.handle(command, config, result);
 
             assertNotNull(result.getResult());
@@ -151,33 +132,18 @@ class SingleNodeDownloadHandlerTest {
 
         @BeforeEach
         void setup() throws Exception {
-            when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(baseFileInfo);
-            when(transferSupport.executeWithClient(eq("ftp1"), any()))
-                    .thenAnswer(invocation -> {
-                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
-                        return cb.run(ftpClient);
-                    });
-            when(transferSupport.preCheck(ftpClient, config, baseFileInfo)).thenReturn(true);
+            mockPreCheckSuccess();
             when(bucketDistributor.distinctBuckets(config)).thenReturn(List.of("EAST", "WEST"));
 
-            // Bucket processing
-            when(ftpPool.getClient("ftp1")).thenReturn(ftpClient);
+            // Pipeline mocks for bucket processing
             when(transferSupport.buildContext(isNull(), eq("REGION"), anyString()))
                     .thenReturn(Map.of());
             when(transferSupport.resolveFilePath(anyString(), anyMap()))
                     .thenReturn(ResolvedPath.of("/data/output_EAST.csv"));
 
-            when(targetTableRepository.countByBucket(anyString(), anyString(), anyString(), anyString()))
-                    .thenReturn(50);
-            when(transferSupport.handleEmptyData(anyInt(), any())).thenReturn(true);
-
-            FieldMapping mapping = new FieldMapping();
-            mapping.setTableFields(Collections.singletonList("col1"));
-            when(fieldMappingBuilder.buildForDownload(config)).thenReturn(mapping);
-            when(converterFactory.get("CSV")).thenReturn(fileConverter);
-            when(targetTableRepository.streamBucketData(anyString(), anyString(), anyString(), anyString()))
-                    .thenReturn(mock(com.fmsy.repository.TargetTableRepository.DataStream.class));
-            when(ftpClient.getOutputStream(anyString())).thenReturn(mock(OutputStream.class));
+            when(downloadSupport.executePipeline(anyString(), eq(config), any(ResolvedPath.class), any()))
+                    .thenReturn(new DownloadSupport.PipelineResult(
+                            50, true, ColumnNames.STATUS_SUCCESS, "/data/output_EAST.csv"));
         }
 
         @Test
@@ -185,7 +151,8 @@ class SingleNodeDownloadHandlerTest {
         void shouldProcessSerialBuckets() throws Exception {
             handler.handle(command, config, result);
 
-            verify(ftpClient, atLeastOnce()).completePendingCommand();
+            verify(downloadSupport, times(2)).executePipeline(
+                    eq("ftp1"), eq(config), any(ResolvedPath.class), any());
             assertNotNull(result.getResult());
         }
 
@@ -193,6 +160,18 @@ class SingleNodeDownloadHandlerTest {
         @DisplayName("should generate total flag when postOps contains TOTAL")
         void shouldGenerateTotalFlag() throws Exception {
             config.setPostOperations("TOTAL:/total.flg;L S M;SUB:{X}.flg;L S M");
+
+            handler.handle(command, config, result);
+
+            assertNotNull(result.getResult());
+        }
+
+        @Test
+        @DisplayName("should count pipeline failures as errors")
+        void shouldCountPipelineFailures() throws Exception {
+            when(downloadSupport.executePipeline(anyString(), eq(config), any(ResolvedPath.class), any()))
+                    .thenReturn(new DownloadSupport.PipelineResult(
+                            0, false, ColumnNames.STATUS_ERROR, "/data/output_EAST.csv"));
 
             handler.handle(command, config, result);
 
@@ -207,14 +186,7 @@ class SingleNodeDownloadHandlerTest {
         @BeforeEach
         void setup() throws Exception {
             command.setCommandType(CommandType.BATCH);
-
-            when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(baseFileInfo);
-            when(transferSupport.executeWithClient(eq("ftp1"), any()))
-                    .thenAnswer(invocation -> {
-                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
-                        return cb.run(ftpClient);
-                    });
-            when(transferSupport.preCheck(ftpClient, config, baseFileInfo)).thenReturn(true);
+            mockPreCheckSuccess();
 
             Detail bucket1 = new Detail();
             bucket1.setId(10L);
@@ -225,22 +197,14 @@ class SingleNodeDownloadHandlerTest {
             when(bucketDistributor.getBuckets(1L, Integer.MAX_VALUE))
                     .thenReturn(List.of(bucket1, bucket2));
 
-            when(ftpPool.getClient("ftp1")).thenReturn(ftpClient);
             when(transferSupport.buildContext(isNull(), eq("REGION"), anyString()))
                     .thenReturn(Map.of());
             when(transferSupport.resolveFilePath(anyString(), anyMap()))
                     .thenReturn(ResolvedPath.of("/data/output_EAST.csv"));
 
-            when(targetTableRepository.countByBucket(anyString(), anyString(), anyString(), anyString()))
-                    .thenReturn(50);
-            when(transferSupport.handleEmptyData(anyInt(), any())).thenReturn(true);
-
-            FieldMapping mapping = new FieldMapping();
-            when(fieldMappingBuilder.buildForDownload(config)).thenReturn(mapping);
-            when(converterFactory.get("CSV")).thenReturn(fileConverter);
-            when(targetTableRepository.streamBucketData(anyString(), anyString(), anyString(), anyString()))
-                    .thenReturn(mock(com.fmsy.repository.TargetTableRepository.DataStream.class));
-            when(ftpClient.getOutputStream(anyString())).thenReturn(mock(OutputStream.class));
+            when(downloadSupport.executePipeline(anyString(), eq(config), any(ResolvedPath.class), any()))
+                    .thenReturn(new DownloadSupport.PipelineResult(
+                            50, true, ColumnNames.STATUS_SUCCESS, "/data/output_EAST.csv"));
         }
 
         @Test

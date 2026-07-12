@@ -2,10 +2,14 @@ package com.fmsy.transfer.download;
 
 import com.fmsy.audit.AuditScenario;
 import com.fmsy.audit.AuditService;
+import com.fmsy.converter.ConverterFactory;
 import com.fmsy.ftp.FtpClient;
+import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.TargetTableRepository;
+import com.fmsy.transfer.FieldMappingBuilder;
+import com.fmsy.transfer.TransferSupport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -34,13 +38,29 @@ class DownloadSupportTest {
     private DetailRepository detailRepository;
 
     @Mock
+    private FtpPool ftpPool;
+
+    @Mock
+    private TransferSupport transferSupport;
+
+    @Mock
+    private ConverterFactory converterFactory;
+
+    @Mock
+    private FieldMappingBuilder fieldMappingBuilder;
+
+    @Mock
+    private ParallelFileGenerator parallelFileGenerator;
+
+    @Mock
     private FtpClient ftpClient;
 
     private DownloadSupport downloadSupport;
 
     @BeforeEach
     void setUp() {
-        downloadSupport = new DownloadSupport(auditService, targetTableRepository, detailRepository);
+        downloadSupport = new DownloadSupport(auditService, targetTableRepository, detailRepository,
+                ftpPool, transferSupport, converterFactory, fieldMappingBuilder, parallelFileGenerator);
     }
 
     @Nested
@@ -205,96 +225,6 @@ class DownloadSupportTest {
     }
 
     @Nested
-    @DisplayName("extractSubfileName")
-    class ExtractSubfileNameTests {
-
-        @Test
-        @DisplayName("should extract stem from file path")
-        void shouldExtractStem() {
-            String result = downloadSupport.extractSubfileName("/data/file.csv");
-            assertEquals("file", result);
-        }
-
-        @Test
-        @DisplayName("should return full name when no extension")
-        void shouldReturnFullNameWhenNoExtension() {
-            String result = downloadSupport.extractSubfileName("/data/file");
-            assertEquals("file", result);
-        }
-
-        @Test
-        @DisplayName("should handle null input")
-        void shouldHandleNull() {
-            assertNull(downloadSupport.extractSubfileName(null));
-        }
-
-        @Test
-        @DisplayName("should handle paths with multiple dots")
-        void shouldHandleMultipleDots() {
-            String result = downloadSupport.extractSubfileName("/data/my.file.name.csv");
-            assertEquals("my.file.name", result);
-        }
-    }
-
-    @Nested
-    @DisplayName("buildSplitFieldPredicates")
-    class BuildSplitFieldPredicatesTests {
-
-        @Test
-        @DisplayName("should build predicates from split fields")
-        void shouldBuildPredicates() {
-            List<Object> params = new java.util.ArrayList<>();
-
-            List<String> predicates = downloadSupport.buildSplitFieldPredicates(
-                    "REGION,STATUS", List.of("EAST", "ACTIVE"), params);
-
-            assertEquals(2, predicates.size());
-            assertEquals("REGION = ?", predicates.get(0));
-            assertEquals("STATUS = ?", predicates.get(1));
-            assertEquals(List.of("EAST", "ACTIVE"), params);
-        }
-
-        @Test
-        @DisplayName("should handle mismatched field/value counts")
-        void shouldHandleMismatchedCounts() {
-            List<Object> params = new java.util.ArrayList<>();
-
-            List<String> predicates = downloadSupport.buildSplitFieldPredicates(
-                    "A,B,C", List.of("1", "2"), params);
-
-            assertEquals(2, predicates.size());
-            assertEquals("A = ?", predicates.get(0));
-            assertEquals("B = ?", predicates.get(1));
-        }
-
-        @Test
-        @DisplayName("should return empty list for null inputs")
-        void shouldReturnEmptyForNullInputs() {
-            List<Object> params = new java.util.ArrayList<>();
-
-            List<String> predicates = downloadSupport.buildSplitFieldPredicates(
-                    null, List.of("v"), params);
-            assertTrue(predicates.isEmpty());
-
-            predicates = downloadSupport.buildSplitFieldPredicates(
-                    "F", null, params);
-            assertTrue(predicates.isEmpty());
-        }
-
-        @Test
-        @DisplayName("should skip empty field names")
-        void shouldSkipEmptyFieldNames() {
-            List<Object> params = new java.util.ArrayList<>();
-
-            List<String> predicates = downloadSupport.buildSplitFieldPredicates(
-                    ",A", List.of("v1", "v2"), params);
-
-            assertEquals(1, predicates.size());
-            assertEquals("A = ?", predicates.get(0));
-        }
-    }
-
-    @Nested
     @DisplayName("determineMainStatus")
     class DetermineMainStatusTests {
 
@@ -358,39 +288,6 @@ class DownloadSupportTest {
                     ftpClient, "/path/file.csv", "reason");
 
             assertFalse(result);
-        }
-    }
-
-    @Nested
-    @DisplayName("updateDetailStatusForBucket")
-    class UpdateDetailStatusForBucketTests {
-
-        @Test
-        @DisplayName("should update detail status when id is present")
-        void shouldUpdateWhenIdPresent() {
-            var detail = new com.fmsy.model.Detail();
-            detail.setId(1L);
-
-            downloadSupport.updateDetailStatusForBucket(detail, "Y", "node-1");
-
-            verify(detailRepository).updateStatus(1L, "Y", "node-1");
-        }
-
-        @Test
-        @DisplayName("should skip update when detail is null")
-        void shouldSkipWhenDetailIsNull() {
-            downloadSupport.updateDetailStatusForBucket(null, "Y", "node-1");
-            verifyNoInteractions(detailRepository);
-        }
-
-        @Test
-        @DisplayName("should skip update when id is null")
-        void shouldSkipWhenIdIsNull() {
-            var detail = new com.fmsy.model.Detail();
-            detail.setId(null);
-
-            downloadSupport.updateDetailStatusForBucket(detail, "Y", "node-1");
-            verifyNoInteractions(detailRepository);
         }
     }
 }
