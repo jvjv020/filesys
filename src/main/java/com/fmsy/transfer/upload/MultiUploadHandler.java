@@ -44,9 +44,6 @@ public class MultiUploadHandler implements TransferHandler {
     static final int TASK_SKIP = -1;
     static final int TASK_FAIL = -2;
 
-    /** 已知的标志文件后缀（用于预扫描过滤） */
-    private static final Set<String> KNOWN_FLAG_SUFFIXES = Set.of(".OK", ".ok", ".ready", ".flag", ".flg");
-
     private final DetailRepository detailRepository;
     private final UploadSupport support;
     private final TransferSupport transferSupport;
@@ -187,7 +184,6 @@ public class MultiUploadHandler implements TransferHandler {
      * 预扫描文件列表，过滤出有效的数据文件。
      *
      * <p>对于有数据文件但无对应标志文件的，日志告警并跳过。
-     * 已知标志文件后缀（{@link #KNOWN_FLAG_SUFFIXES}）的文件会被静默过滤。
      *
      * @param allFiles    目录中所有文件的列表
      * @param flagPattern FLAG 路径模式（如 {@code "{stem}.OK"}），为 null 时不执行预扫描
@@ -209,9 +205,6 @@ public class MultiUploadHandler implements TransferHandler {
         List<String> dataFiles = new ArrayList<>();
         for (String file : allFiles) {
             String name = fileNameOnly(file);
-
-            // 检查本文件是否是已知的标志文件
-            if (isKnownFlagFile(name, allNames)) continue;
 
             // 为本文件解析期望的标志文件路径
             String expectedFlagName = resolveFlagName(flagPattern, ResolvedPath.of(file));
@@ -236,25 +229,6 @@ public class MultiUploadHandler implements TransferHandler {
             }
         }
         return dataFiles;
-    }
-
-    /**
-     * 判断文件名是否是已知的标志文件（有匹配的数据文件存在）。
-     */
-    private boolean isKnownFlagFile(String name, Set<String> allNames) {
-        for (String suffix : KNOWN_FLAG_SUFFIXES) {
-            if (name.endsWith(suffix)) {
-                String stem = name.substring(0, name.length() - suffix.length());
-                // 检查是否有同名（不同扩展名）的数据文件存在
-                for (String otherName : allNames) {
-                    int dot = otherName.lastIndexOf('.');
-                    if (dot > 0 && otherName.substring(0, dot).equals(stem) && !otherName.equals(name)) {
-                        return true; // 有数据文件引用此标志 → 是本标志文件
-                    }
-                }
-            }
-        }
-        return false;
     }
 
     /**
