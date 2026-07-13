@@ -9,6 +9,7 @@ import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
+import com.fmsy.transfer.TransferUtils;
 import com.fmsy.util.BooleanUtils;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
@@ -77,8 +78,7 @@ public class MultiUploadHandler implements TransferHandler {
         }
         if (allFiles.length == 0) {
             log.info("No files found in directory: {} (pattern: {})", dirInfo, listPattern);
-            result.setOutcome(0, UploadSupport.determineMainStatus(
-                    new UploadSupport.UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED)), "");
+            result.setOutcome(0, TransferSupport.determineMainStatus(false, 0, 1), "");
             return;
         }
         log.info("Found {} files in directory: {} (pattern: {})", allFiles.length, dirInfo, listPattern);
@@ -155,8 +155,7 @@ public class MultiUploadHandler implements TransferHandler {
         }
 
         result.setOutcome(totalRecords,
-                UploadSupport.determineMainStatus(new UploadSupport.UploadResult(
-                        totalRecords, successCount, skippedCount, failedCount, null)), "");
+                TransferSupport.determineMainStatus(failedCount == 0 && skippedCount == 0, failedCount, skippedCount), "");
     }
 
     /**
@@ -268,14 +267,8 @@ public class MultiUploadHandler implements TransferHandler {
     static String resolveFlagName(String flagPattern, ResolvedPath fileInfo) {
         if (flagPattern == null || fileInfo == null) return null;
 
-        // 展开文件衍生变量
-        String resolved = flagPattern
-                .replace("{stem}", fileInfo.stem() != null ? fileInfo.stem() : "")
-                .replace("{name}", fileInfo.name() != null ? fileInfo.name() : "")
-                .replace("{ext}", fileInfo.ext() != null ? fileInfo.ext() : "")
-                .replace("{dir}", fileInfo.dir() != null ? fileInfo.dir() : "")
-                .replace("{dn}", fileInfo.dn() != null ? fileInfo.dn() : "")
-                .replace("{up}", fileInfo.up() != null ? fileInfo.up() : "");
+        // 展开文件衍生变量（委托给 TransferSupport 公共方法）
+        String resolved = TransferSupport.expandPathVariables(flagPattern, fileInfo);
 
         // 相对路径加目录前缀
         if (!resolved.startsWith("/") && fileInfo.dir() != null && !fileInfo.dir().isEmpty()) {
@@ -320,8 +313,7 @@ public class MultiUploadHandler implements TransferHandler {
 
         if (details.isEmpty()) {
             log.info("No details found for command: {}", command.getId());
-            result.setOutcome(0, UploadSupport.determineMainStatus(
-                    new UploadSupport.UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED)), "");
+            result.setOutcome(0, TransferSupport.determineMainStatus(false, 0, 1), "");
             return;
         }
 
@@ -364,8 +356,7 @@ public class MultiUploadHandler implements TransferHandler {
         }
 
         result.setOutcome(totalRecords,
-                UploadSupport.determineMainStatus(new UploadSupport.UploadResult(
-                        totalRecords, successCount, skippedCount, failedCount, null)), "");
+                TransferSupport.determineMainStatus(failedCount == 0 && skippedCount == 0, failedCount, skippedCount), "");
     }
 
     /**
@@ -422,16 +413,7 @@ public class MultiUploadHandler implements TransferHandler {
     // ==================== 通用工具 ====================
 
     private static void shutdownExecutor(ExecutorService executor) {
-        executor.shutdown();
-        try {
-            if (!executor.awaitTermination(1, TimeUnit.MINUTES)) {
-                log.warn("Upload executor did not terminate within 1 hour, forcing shutdown");
-                executor.shutdownNow();
-            }
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            executor.shutdownNow();
-        }
+        TransferUtils.shutdownExecutor(executor, 1, TimeUnit.MINUTES, "Upload executor");
     }
 
     private void rollbackOnFailure(TransferConfig config, int failedCount) throws TransferException {

@@ -172,6 +172,20 @@ public class TransferSupport {
     }
 
     /**
+     * 替换路径模板中的文件衍生变量 — 将 {stem}/{name}/{ext}/{dir}/{dn}/{up} 替换为实际值。
+     */
+    public static String expandPathVariables(String template, ResolvedPath fileInfo) {
+        if (template == null || fileInfo == null) return template;
+        return template
+                .replace("{stem}", fileInfo.stem() != null ? fileInfo.stem() : "")
+                .replace("{name}", fileInfo.name() != null ? fileInfo.name() : "")
+                .replace("{ext}", fileInfo.ext() != null ? fileInfo.ext() : "")
+                .replace("{dir}", fileInfo.dir() != null ? fileInfo.dir() : "")
+                .replace("{dn}", fileInfo.dn() != null ? fileInfo.dn() : "")
+                .replace("{up}", fileInfo.up() != null ? fileInfo.up() : "");
+    }
+
+    /**
      * 主 FtpClient 借还模板。
      */
     public <T> T executeWithClient(String ftpName, FtpClientCallback<T> callback) throws Exception {

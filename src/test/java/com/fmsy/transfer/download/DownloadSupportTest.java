@@ -231,19 +231,19 @@ class DownloadSupportTest {
         @Test
         @DisplayName("should return SUCCESS when all succeed")
         void shouldReturnSuccess() {
-            assertEquals("Y", DownloadSupport.determineMainStatus(true, 0, 0));
+            assertEquals("Y", TransferSupport.determineMainStatus(true, 0, 0));
         }
 
         @Test
         @DisplayName("should return ERROR when any failed")
         void shouldReturnError() {
-            assertEquals("E", DownloadSupport.determineMainStatus(false, 1, 0));
+            assertEquals("E", TransferSupport.determineMainStatus(false, 1, 0));
         }
 
         @Test
         @DisplayName("should return SKIPPED when none failed but skipped")
         void shouldReturnSkipped() {
-            assertEquals("N", DownloadSupport.determineMainStatus(false, 0, 1));
+            assertEquals("N", TransferSupport.determineMainStatus(false, 0, 1));
         }
     }
 

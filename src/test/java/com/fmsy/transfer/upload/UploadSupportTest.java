@@ -467,22 +467,22 @@ class UploadSupportTest {
         @Test
         @DisplayName("should return SUCCESS when all succeed")
         void shouldReturnSuccessWhenAllSucceed() {
-            var result = new UploadSupport.UploadResult(100, 1, 0, 0, null);
-            assertEquals(ColumnNames.STATUS_SUCCESS, UploadSupport.determineMainStatus(result));
+            assertEquals(ColumnNames.STATUS_SUCCESS,
+                    TransferSupport.determineMainStatus(true, 0, 0));
         }
 
         @Test
         @DisplayName("should return ERROR when any failed")
         void shouldReturnErrorWhenAnyFailed() {
-            var result = new UploadSupport.UploadResult(50, 0, 0, 2, ColumnNames.STATUS_ERROR);
-            assertEquals(ColumnNames.STATUS_ERROR, UploadSupport.determineMainStatus(result));
+            assertEquals(ColumnNames.STATUS_ERROR,
+                    TransferSupport.determineMainStatus(false, 2, 0));
         }
 
         @Test
         @DisplayName("should return SKIPPED when all skipped")
         void shouldReturnSkippedWhenAllSkipped() {
-            var result = new UploadSupport.UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED);
-            assertEquals(ColumnNames.STATUS_SKIPPED, UploadSupport.determineMainStatus(result));
+            assertEquals(ColumnNames.STATUS_SKIPPED,
+                    TransferSupport.determineMainStatus(false, 0, 1));
         }
     }
 

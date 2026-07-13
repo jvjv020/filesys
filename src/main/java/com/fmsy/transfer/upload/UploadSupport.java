@@ -250,28 +250,41 @@ public class UploadSupport {
                                           String filePath, Map<String, Object> detailContext) {
         ResolvedPath fileInfo = ResolvedPath.of(filePath);
 
-        // Phase 1: preCheck — 标志文件不存在返回false（跳过），比对失败抛FlagCheckException
+        // Phase 1: preCheck — 标志文件不存在返回跳过，比对失败抛 FlagCheckException
+        UploadResult preCheckResult = phase1PreCheck(client, config, fileInfo, filePath);
+        if (preCheckResult != null) return preCheckResult;
+
+        // Phase 2a: preAudit — 文件记录数 vs 稽核数
+        FileConverter converter = converterFactory.get(config.getParserType());
+        int preAuditResult = preAudit(auditCount, config, filePath, converter);
+        if (preAuditResult < 0) {
+            throw new RuntimeException("Pre-audit failed for: " + filePath);
+        }
+
+        // Phase 2b: 流式解析 + 批量插入 + 后审计
+        return phase2bInsertAndVerify(client, config, fileInfo, detailContext, converter, filePath);
+    }
+
+    /** Phase 1: 前置文件检查 — null=通过，非null=跳过结果。 */
+    private UploadResult phase1PreCheck(FtpClient client, TransferConfig config,
+                                        ResolvedPath fileInfo, String filePath) {
         try {
             if (!transferSupport.preCheck(client, config, fileInfo)) {
-                // 标志文件不存在 → 告警跳过，不迁移文件
                 log.warn("Pre-check failed (flag not found) for: {}", filePath);
                 return new UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED);
             }
         } catch (FlagCheckException e) {
-            // FLAG比对失败 → 抛异常，由调用方负责迁数据文件+标志文件到error目录
+            // FLAG 比对失败 → 上抛，由调用方负责迁文件到 error 目录
             throw e;
         }
+        return null;
+    }
 
-        // Phase 2: preAudit
-        FileConverter converter = converterFactory.get(config.getParserType());
-        int preAuditResult = preAudit(auditCount, config, filePath, converter);
-        if (preAuditResult < 0) {
-            // preAudit失败 → 迁文件，抛异常供调用方标记ERROR
-            throw new RuntimeException("Pre-audit failed for: " + filePath);
-        }
-
-        // Phase 2: read & insert
-        // 构建字段映射（detailContext非空时取明细中的字段）
+    /** Phase 2b: 构建映射 → 流式解析 → 插入+后审计 → 后操作。 */
+    private UploadResult phase2bInsertAndVerify(FtpClient client, TransferConfig config,
+                                                ResolvedPath fileInfo,
+                                                Map<String, Object> detailContext,
+                                                FileConverter converter, String filePath) {
         FieldMapping mapping = fieldMappingBuilder.buildForUpload(config, detailContext);
         try (InputStream is = client.getInputStream(filePath);
              CloseableIterator<List<Map<String, Object>>> dataIter =
@@ -280,15 +293,13 @@ public class UploadSupport {
             boolean truncateFirst = BooleanUtils.isYes(config.getClearTableFlag());
             int count = insertAndVerifyPerFileInTx(config, dataIter, mapping, truncateFirst);
             if (count < 0) {
-                // 非ERROR模式后审计失败 → 迁文件，抛异常
                 throw new RuntimeException("Post-audit failed for: " + filePath);
             }
 
-            // Phase 3: postProcess
+            // Phase 3: postProcess（失败不影响结果状态，仅记录）
             try {
                 transferSupport.postProcess(client, config, fileInfo, Map.of("C", String.valueOf(count)));
             } catch (Exception e) {
-                // postProcess失败不影响结果状态，仅记录
                 log.warn("Post-process failed for {}: {}", filePath, e.getMessage());
             }
 
@@ -394,17 +405,10 @@ public class UploadSupport {
     }
 
     /**
-     * 替换路径模板中的文件衍生变量。
+     * 替换路径模板中的文件衍生变量 — 委托给 {@link TransferSupport#expandPathVariables}。
      */
     private static String expandPathVariables(String template, ResolvedPath fileInfo) {
-        if (template == null || fileInfo == null) return template;
-        return template
-                .replace("{stem}", fileInfo.stem() != null ? fileInfo.stem() : "")
-                .replace("{name}", fileInfo.name() != null ? fileInfo.name() : "")
-                .replace("{ext}", fileInfo.ext() != null ? fileInfo.ext() : "")
-                .replace("{dir}", fileInfo.dir() != null ? fileInfo.dir() : "")
-                .replace("{dn}", fileInfo.dn() != null ? fileInfo.dn() : "")
-                .replace("{up}", fileInfo.up() != null ? fileInfo.up() : "");
+        return TransferSupport.expandPathVariables(template, fileInfo);
     }
 
     /**
@@ -465,9 +469,5 @@ public class UploadSupport {
         public static UploadResult allSkipped() { return new UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED); }
     }
 
-    public static String determineMainStatus(UploadResult result) {
-        boolean allSuccess = result.failedCount() == 0 && result.skippedCount() == 0;
-        return TransferSupport.determineMainStatus(allSuccess, result.failedCount(), result.skippedCount());
-    }
 
 }
