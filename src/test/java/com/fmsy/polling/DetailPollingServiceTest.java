@@ -15,7 +15,9 @@ import com.fmsy.repository.ResultRepository;
 import com.fmsy.transfer.BucketDistributor;
 import com.fmsy.transfer.TempTransferConfigFactory;
 import com.fmsy.transfer.TransferSupport;
-import com.fmsy.transfer.download.DownloadSupport;
+import com.fmsy.transfer.download.BucketProcessor;
+import com.fmsy.transfer.download.BucketProcessor.BucketBatchResult;
+import com.fmsy.transfer.download.BucketProcessor.BucketProcessingOptions;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,24 +25,18 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.IntFunction;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
-
-import org.mockito.ArgumentCaptor;
 
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -78,13 +74,7 @@ class DetailPollingServiceTest {
     private ResultRepository resultRepository;
 
     @Mock
-    private DownloadSupport downloadSupport;
-
-    @Mock
-    private IntFunction<ExecutorService> batchExecutorFactory;
-
-    @Mock
-    private ExecutorService mockExecutor;
+    private BucketProcessor bucketProcessor;
 
     @Mock
     private ShutdownService shutdownService;
@@ -102,8 +92,8 @@ class DetailPollingServiceTest {
         detailPollingService = new DetailPollingService(
                 detailRepository, bucketDistributor,
                 configLoader, commandRepository, tempConfigFactory,
-                appConfig, transferSupport, resultRepository, downloadSupport,
-                batchExecutorFactory, shutdownService);
+                appConfig, transferSupport, resultRepository,
+                bucketProcessor, shutdownService);
     }
 
     private Command createSubCommand(Long id, String category, String control, CommandType type, String extraInfo) {
@@ -205,8 +195,8 @@ class DetailPollingServiceTest {
     class BucketIterationTests {
 
         @Test
-        @DisplayName("should process buckets in iterations")
-        void shouldProcessBucketsInIterations() throws Exception {
+        @DisplayName("should process buckets via BucketProcessor in iterations")
+        void shouldProcessBucketsViaBucketProcessor() {
             Command subCmd = createSubCommand(10L, "CAT1", "CTRL1", CommandType.COORDINATED, "100|/base/path");
             TransferConfig config = createDownloadConfig();
             when(configLoader.getConfigOrDefault("CAT1", "CTRL1")).thenReturn(config);
@@ -217,29 +207,19 @@ class DetailPollingServiceTest {
                     .thenReturn(List.of(bucket))
                     .thenReturn(new ArrayList<>());
 
-            when(batchExecutorFactory.apply(1)).thenReturn(mockExecutor);
-            doAnswer(invocation -> {
-                ((Runnable) invocation.getArgument(0)).run();
-                return null;
-            }).when(mockExecutor).execute(any(Runnable.class));
-            when(mockExecutor.awaitTermination(1, TimeUnit.HOURS)).thenReturn(true);
-
-            // Mock bucket competition to succeed
-            when(bucketDistributor.competeBucket(1L, "node1")).thenReturn(1);
-            // Mock resolveFilePath
-            ResolvedPath resolvedPath = ResolvedPath.of("/data/export/region1.csv");
-            Map<String, String> context = new HashMap<>();
-            when(transferSupport.buildContext(null, "region", "region1")).thenReturn(context);
-            when(transferSupport.resolveFilePath(config.getFilePath(), context)).thenReturn(resolvedPath);
-
-            // Mock download pipeline to return success
-            when(downloadSupport.executePipeline(eq("ftp1"), eq(config), eq(resolvedPath), any()))
-                    .thenReturn(new DownloadSupport.PipelineResult(
-                            10, true, ColumnNames.STATUS_SUCCESS, "/data/export/region1.csv"));
+            // Mock BucketProcessor to return success
+            BucketBatchResult mockResult = mock(BucketBatchResult.class);
+            when(mockResult.getSuccessCount()).thenReturn(1);
+            when(mockResult.getFailedCount()).thenReturn(0);
+            when(mockResult.getSkippedCount()).thenReturn(0);
+            when(bucketProcessor.processAll(eq(List.of(bucket)), eq(config), any(ResolvedPath.class),
+                    eq("ftp1"), any(BucketProcessingOptions.class), eq("node1")))
+                    .thenReturn(mockResult);
 
             detailPollingService.pollAndProcess("node1", "100", subCmd);
 
-            verify(downloadSupport).executePipeline(eq("ftp1"), eq(config), eq(resolvedPath), any());
+            verify(bucketProcessor).processAll(eq(List.of(bucket)), eq(config), any(ResolvedPath.class),
+                    eq("ftp1"), any(BucketProcessingOptions.class), eq("node1"));
             verify(detailRepository, atLeast(1)).findReadyBuckets(100L, 3);
         }
 
@@ -262,41 +242,11 @@ class DetailPollingServiceTest {
             Command subCmd = createSubCommand(10L, "CAT1", "CTRL1", CommandType.COORDINATED, "100|/base/path");
             TransferConfig config = createDownloadConfig();
             when(configLoader.getConfigOrDefault("CAT1", "CTRL1")).thenReturn(config);
-
-            // Make sure we don't stop early due to shutdown
             when(shutdownService.isShuttingDown()).thenReturn(false);
-
-            // Return some buckets so we enter the loop, but simulate timeout
-            // by having System.currentTimeMillis() - startTime >= timeoutMs
-            // This is tricky to mock, so let's just verify the loop structure works
 
             detailPollingService.pollAndProcess("node1", "100", subCmd);
 
             verify(resultRepository).insert(any(Result.class));
-        }
-
-        @Test
-        @DisplayName("should handle InterruptedException")
-        void shouldHandleInterruptedException() {
-            Command subCmd = createSubCommand(10L, "CAT1", "CTRL1", CommandType.COORDINATED, "100|/base/path");
-            TransferConfig config = createDownloadConfig();
-            when(configLoader.getConfigOrDefault("CAT1", "CTRL1")).thenReturn(config);
-
-            Detail bucket = createBucket(1L, "region1", 10);
-            when(detailRepository.findReadyBuckets(100L, 3))
-                    .thenReturn(List.of(bucket));
-
-            when(batchExecutorFactory.apply(1)).thenReturn(mockExecutor);
-            try {
-                when(mockExecutor.awaitTermination(1, TimeUnit.HOURS)).thenThrow(new InterruptedException("interrupted"));
-            } catch (Exception e) {
-                // mockito syntax
-            }
-
-            detailPollingService.pollAndProcess("node1", "100", subCmd);
-
-            // Should restore interrupt flag
-            assertTrue(Thread.interrupted());
         }
 
         @Test
@@ -320,7 +270,6 @@ class DetailPollingServiceTest {
         @Test
         @DisplayName("should return SKIPPED when all counts are zero")
         void shouldReturnSkippedWhenAllZero() {
-            // Access private method via reflection
             String result = invokeDetermineResult(0, 0, 0);
             assertEquals("N", result);
         }

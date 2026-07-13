@@ -14,6 +14,9 @@ import com.fmsy.repository.ResultRepository;
 import com.fmsy.transfer.BucketDistributor;
 import com.fmsy.transfer.TempTransferConfigFactory;
 import com.fmsy.transfer.TransferSupport;
+import com.fmsy.transfer.download.BucketProcessor;
+import com.fmsy.transfer.download.BucketProcessor.BucketBatchResult;
+import com.fmsy.transfer.download.BucketProcessor.BucketProcessingOptions;
 import com.fmsy.transfer.download.DownloadSupport;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.LogUtils;
@@ -25,23 +28,15 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.IntFunction;
 
 /**
  * 明细轮询服务 - S型子命令处理
  *
  * 功能说明：
  * - 被主线程调用，处理DOWNLOAD_MULTI_NODE场景下的S型子命令
- * - 从明细表获取待处理的桶，竞争处理权后并行处理(每子命令独立线程池)
+ * - 从明细表获取待处理的桶，竞争处理权后委托 {@link BucketProcessor} 并行处理
  * - 各节点通过竞争机制分配桶，避免重复处理
- *
- * 处理流程（针对每个桶）：
- * 1. 竞争桶的处理权
- * 2. 通过 {@link com.fmsy.transfer.download.DownloadSupport#executePipeline} 执行单文件下载管线：
- *    前置检查 → 预审计 → 空数据处理 → 文件生成 → 后审计 → 后操作(SUB标志)
  *
  * 线程模型：
  * - 每次 pollAndProcess 调用创建一个新的 ExecutorService
@@ -61,10 +56,7 @@ public class DetailPollingService {
     private final AppConfig appConfig;
     private final TransferSupport transferSupport;
     private final ResultRepository resultRepository;
-    private final DownloadSupport downloadSupport;
-    /** 每子命令独立的批处理线程池工厂 */
-    private final IntFunction<ExecutorService> batchExecutorFactory;
-    /** 关闭服务(轮询期间检查是否正在关闭) */
+    private final BucketProcessor bucketProcessor;
     private final ShutdownService shutdownService;
 
     /**
@@ -87,7 +79,6 @@ public class DetailPollingService {
         AtomicInteger failedCount = new AtomicInteger(0);
         AtomicInteger skippedCount = new AtomicInteger(0);
         int totalBucketCount = 0;
-        ExecutorService bucketExecutor = null;
         TransferConfig sharedConfig = null;
 
         try {
@@ -98,6 +89,9 @@ public class DetailPollingService {
                 writeSubCommandResult(subCommand, startTime, null, 0, 0, 1, 0);
                 return;
             }
+
+            // 基础文件路径模板(含占位符),供 BucketProcessor 每桶解析
+            ResolvedPath baseFileInfo = ResolvedPath.of(sharedConfig.getFilePath());
 
             int iteration = 0;
             while (iteration < maxIterations) {
@@ -126,40 +120,31 @@ public class DetailPollingService {
                         totalBucketCount + buckets.size());
                 totalBucketCount += buckets.size();
 
-                // 本批次独立线程池,与之前/之后批次隔离
-                bucketExecutor = batchExecutorFactory.apply(buckets.size());
-                for (Detail bucket : buckets) {
-                    TransferConfig bucketConfig = sharedConfig;
-                    bucketExecutor.execute(() -> runOneBucket(bucket, nodeId, bucketConfig,
-                            successCount, failedCount, skippedCount));
-                }
-                bucketExecutor.shutdown();
-                if (!bucketExecutor.awaitTermination(1, java.util.concurrent.TimeUnit.HOURS)) {
-                    log.error("Bucket processing timed out for sub-command: {} (iteration {})",
-                            subCommand.getId(), iteration);
-                }
-                // 本批次完成,清空引用供 finally 区分(下轮会重新赋值)
-                bucketExecutor = null;
+                // 委托 BucketProcessor 并行处理本批次桶
+                BucketBatchResult br = bucketProcessor.processAll(buckets, sharedConfig, baseFileInfo,
+                        sharedConfig.getFtpName(),
+                        BucketProcessingOptions.builder()
+                                .contentionStrategy(
+                                        (detail, nid) -> bucketDistributor.competeBucket(detail.getId(), nid) == 1)
+                                .pipelineCustomizer((pipelineOpts, bucket, fileInfo) -> {
+                                    pipelineOpts.setExpectedAuditCount(bucket.getAuditCount());
+                                })
+                                .build(),
+                        nodeId);
+
+                successCount.addAndGet(br.getSuccessCount());
+                failedCount.addAndGet(br.getFailedCount());
+                skippedCount.addAndGet(br.getSkippedCount());
             }
             if (iteration >= maxIterations) {
                 log.error("Sub-command {} reached max iterations ({}); check bucket distributor or query logic",
                         subCommand.getId(), maxIterations);
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.error("Bucket processing interrupted for sub-command: {}", subCommand.getId());
         } catch (RuntimeException e) {
-            // 派发或 await 期间的未受检异常(RejectedExecutionException 等):
-            // 计为失败,保证后续结果表写入正确反映状态
             log.error("Bucket dispatch failed for sub-command: {}", subCommand.getId(), e);
             failedCount.incrementAndGet();
         } finally {
-            // 资源回收:池未终止时强制 shutdownNow,防止线程泄漏
-            if (bucketExecutor != null && !bucketExecutor.isTerminated()) {
-                bucketExecutor.shutdownNow();
-            }
             // 写子命令结束的结果表记录(需求:每个指令结束都得写结果表)
-            // 放在 finally 内确保异常路径也会执行
             writeSubCommandResult(subCommand, startTime, sharedConfig, totalBucketCount,
                     successCount.get(), failedCount.get(), skippedCount.get());
         }
@@ -194,30 +179,6 @@ public class DetailPollingService {
         log.info("Sub-command {} finished: {} (buckets success={} failed={} skipped={}, {}ms)",
                 subCommand.getId(), status, success, failed, skipped, durationMs);
     }
-
-    /** 单桶执行入口(运行在桶线程池中):try/catch + 计数累加,异常不逃逸 */
-    private void runOneBucket(Detail bucket, String nodeId, TransferConfig config,
-                              AtomicInteger successCount, AtomicInteger failedCount, AtomicInteger skippedCount) {
-        try {
-            int affected = bucketDistributor.competeBucket(bucket.getId(), nodeId);
-            if (affected != 1) {
-                log.debug("Bucket {} not acquired (affected={})", bucket.getId(), affected);
-                return;
-            }
-            log.info("Competed bucket: {}, fieldValue: {}", bucket.getId(), bucket.getFieldValue());
-            BucketOutcome outcome = processBucket(bucket, nodeId, config);
-            switch (outcome) {
-                case SUCCESS -> successCount.incrementAndGet();
-                case FAILED -> failedCount.incrementAndGet();
-                case SKIPPED -> skippedCount.incrementAndGet();
-            }
-        } catch (Exception t) {
-            log.error("Bucket processing crashed: {}", bucket.getId(), t);
-            failedCount.incrementAndGet();
-        }
-    }
-
-    private enum BucketOutcome { SUCCESS, FAILED, SKIPPED }
 
     /**
      * 解析 S 子命令对应的 TransferConfig。
@@ -259,52 +220,4 @@ public class DetailPollingService {
         if (failed > 0) return ColumnNames.STATUS_ERROR;   // 任一桶失败 → 主子命令 E
         return ColumnNames.STATUS_SUCCESS;
     }
-
-    /**
-     * 处理单个桶 — 委托 {@link DownloadSupport#executePipeline} 执行单文件下载管线。
-     *
-     * <p>管线内部处理 preCheck + mkdirs → 前稽核 → 空数据处理 → 文件生成 →
-     * SUB 后操作 → 后稽核 → Detail 状态更新。
-     */
-    private BucketOutcome processBucket(Detail bucket, String nodeId, TransferConfig config) {
-        if (config == null) {
-            log.warn("No config found for bucket: {}, category={}, control={}",
-                    bucket.getId(), bucket.getCategoryCode(), bucket.getControlCode());
-            detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_ERROR, nodeId);
-            return BucketOutcome.FAILED;
-        }
-
-        // 解析目标文件路径
-        Map<String, String> bucketContext = transferSupport.buildContext(
-                null, config.getSplitFields(), bucket.getFieldValue());
-        ResolvedPath fileInfo = transferSupport.resolveFilePath(config.getFilePath(), bucketContext);
-
-        // 构建管线选项:分桶模式,开启前操作和后稽核,仅 SUB 后操作
-        DownloadSupport.PipelineOptions opts = DownloadSupport.PipelineOptions.builder()
-                .wholeTable(false)
-                .fieldValue(bucket.getFieldValue())
-                .expectedAuditCount(bucket.getAuditCount())
-                .enablePreCheck(true)
-                .enableOverwriteCheck(false)
-                .enablePostAudit(true)
-                .postOpsFilter("SUB")
-                .detail(bucket)
-                .nodeId(nodeId)
-                .build();
-
-        DownloadSupport.PipelineResult pr = downloadSupport.executePipeline(
-                config.getFtpName(), config, fileInfo, opts);
-
-        // 映射管线结果到 BucketOutcome
-        if (pr.isSuccess()) {
-            log.info("Bucket processed successfully: detailId={}, fieldValue={}, filePath={}, records={}, nodeId={}",
-                    bucket.getId(), bucket.getFieldValue(), fileInfo.fullPath(), pr.getRecordCount(), nodeId);
-            return BucketOutcome.SUCCESS;
-        }
-        if (ColumnNames.STATUS_SKIPPED.equals(pr.getStatus())) {
-            return BucketOutcome.SKIPPED;
-        }
-        return BucketOutcome.FAILED;
-    }
-
 }

@@ -1,7 +1,6 @@
 package com.fmsy.transfer.download;
 
 import com.fmsy.enums.CommandType;
-import com.fmsy.fileops.FlagFileService;
 import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
 import com.fmsy.model.Result;
@@ -9,6 +8,8 @@ import com.fmsy.model.TransferConfig;
 import com.fmsy.transfer.BucketDistributor;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
+import com.fmsy.transfer.download.BucketProcessor.BucketBatchResult;
+import com.fmsy.transfer.download.BucketProcessor.BucketProcessingOptions;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
 import org.junit.jupiter.api.BeforeEach;
@@ -16,15 +17,13 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
-import java.util.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.function.IntFunction;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -36,15 +35,17 @@ import static org.mockito.Mockito.*;
 class SingleNodeDownloadHandlerTest {
 
     @Mock
-    private BucketDistributor bucketDistributor;
+    private BucketProcessor bucketProcessor;
 
     @Mock
-    private DownloadSupport downloadSupport;
+    private BucketDistributor bucketDistributor;
 
     @Mock
     private TransferSupport transferSupport;
 
-    private IntFunction<ExecutorService> batchExecutorFactory;
+    @Mock
+    private DownloadSupport downloadSupport;
+
     private SingleNodeDownloadHandler handler;
 
     private Command command;
@@ -54,9 +55,8 @@ class SingleNodeDownloadHandlerTest {
 
     @BeforeEach
     void setUp() {
-        batchExecutorFactory = size -> Executors.newFixedThreadPool(size);
-        handler = new SingleNodeDownloadHandler(downloadSupport, bucketDistributor,
-                transferSupport, batchExecutorFactory);
+        handler = new SingleNodeDownloadHandler(bucketProcessor, bucketDistributor,
+                transferSupport, downloadSupport);
 
         command = new Command();
         command.setId(1L);
@@ -86,6 +86,22 @@ class SingleNodeDownloadHandlerTest {
                     return cb.run(mock(com.fmsy.ftp.FtpClient.class));
                 });
         when(transferSupport.preCheck(any(), eq(config), eq(baseFileInfo))).thenReturn(true);
+    }
+
+    /** 创建一个 BucketBatchResult 模拟, 含指定数量的成功/失败/跳过桶 */
+    private BucketBatchResult createMockResult(int success, int failed, int skipped, int records) {
+        var mockResult = mock(BucketBatchResult.class);
+        when(mockResult.getSuccessCount()).thenReturn(success);
+        when(mockResult.getFailedCount()).thenReturn(failed);
+        when(mockResult.getSkippedCount()).thenReturn(skipped);
+        when(mockResult.getTotalRecordCount()).thenReturn(records);
+        when(mockResult.isAllSuccess()).thenReturn(failed == 0);
+        when(mockResult.getGeneratedFiles()).thenReturn(List.of());
+        when(mockResult.determineStatus()).thenReturn(
+                failed > 0 ? ColumnNames.STATUS_ERROR
+                        : skipped > 0 ? ColumnNames.STATUS_SKIPPED
+                        : ColumnNames.STATUS_SUCCESS);
+        return mockResult;
     }
 
     @Nested
@@ -135,47 +151,46 @@ class SingleNodeDownloadHandlerTest {
             mockPreCheckSuccess();
             when(bucketDistributor.distinctBuckets(config)).thenReturn(List.of("EAST", "WEST"));
 
-            // Pipeline mocks for bucket processing
-            when(transferSupport.buildContext(isNull(), eq("REGION"), anyString()))
-                    .thenReturn(Map.of());
-            when(transferSupport.resolveFilePath(anyString(), anyMap()))
-                    .thenReturn(ResolvedPath.of("/data/output_EAST.csv"));
-
-            when(downloadSupport.executePipeline(anyString(), eq(config), any(ResolvedPath.class), any()))
-                    .thenReturn(new DownloadSupport.PipelineResult(
-                            50, true, ColumnNames.STATUS_SUCCESS, "/data/output_EAST.csv"));
+            // BucketProcessor 返回成功结果(2个桶各50条)
+            BucketBatchResult mockResult = createMockResult(2, 0, 0, 100);
+            when(bucketProcessor.processAll(anyList(), eq(config), eq(baseFileInfo),
+                    eq("ftp1"), any(BucketProcessingOptions.class), eq("node-1")))
+                    .thenReturn(mockResult);
         }
 
         @Test
-        @DisplayName("should process SERIAL mode buckets")
+        @DisplayName("should process SERIAL mode buckets via BucketProcessor")
         void shouldProcessSerialBuckets() throws Exception {
             handler.handle(command, config, result);
 
-            verify(downloadSupport, times(2)).executePipeline(
-                    eq("ftp1"), eq(config), any(ResolvedPath.class), any());
+            verify(bucketProcessor).processAll(anyList(), eq(config), eq(baseFileInfo),
+                    eq("ftp1"), any(BucketProcessingOptions.class), eq("node-1"));
             assertNotNull(result.getResult());
         }
 
         @Test
         @DisplayName("should generate total flag when postOps contains TOTAL")
         void shouldGenerateTotalFlag() throws Exception {
-            config.setPostOperations("TOTAL:/total.flg;L S M;SUB:{X}.flg;L S M");
+            config.setPostOperations("TOTAL:/total.flg;L S M,SUB:{X}.flg;L S M");
 
             handler.handle(command, config, result);
 
-            assertNotNull(result.getResult());
+            // TOTAL flag generation is invoked via executeWithClient
+            // The mock preCheck returns true, so handle should succeed
+            assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
         }
 
         @Test
         @DisplayName("should count pipeline failures as errors")
         void shouldCountPipelineFailures() throws Exception {
-            when(downloadSupport.executePipeline(anyString(), eq(config), any(ResolvedPath.class), any()))
-                    .thenReturn(new DownloadSupport.PipelineResult(
-                            0, false, ColumnNames.STATUS_ERROR, "/data/output_EAST.csv"));
+            BucketBatchResult mockResult = createMockResult(1, 1, 0, 50);
+            when(bucketProcessor.processAll(anyList(), eq(config), eq(baseFileInfo),
+                    eq("ftp1"), any(BucketProcessingOptions.class), eq("node-1")))
+                    .thenReturn(mockResult);
 
             handler.handle(command, config, result);
 
-            assertNotNull(result.getResult());
+            assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
         }
     }
 
@@ -197,14 +212,10 @@ class SingleNodeDownloadHandlerTest {
             when(bucketDistributor.getBuckets(1L, Integer.MAX_VALUE))
                     .thenReturn(List.of(bucket1, bucket2));
 
-            when(transferSupport.buildContext(isNull(), eq("REGION"), anyString()))
-                    .thenReturn(Map.of());
-            when(transferSupport.resolveFilePath(anyString(), anyMap()))
-                    .thenReturn(ResolvedPath.of("/data/output_EAST.csv"));
-
-            when(downloadSupport.executePipeline(anyString(), eq(config), any(ResolvedPath.class), any()))
-                    .thenReturn(new DownloadSupport.PipelineResult(
-                            50, true, ColumnNames.STATUS_SUCCESS, "/data/output_EAST.csv"));
+            BucketBatchResult mockResult = createMockResult(2, 0, 0, 100);
+            when(bucketProcessor.processAll(anyList(), eq(config), eq(baseFileInfo),
+                    eq("ftp1"), any(BucketProcessingOptions.class), eq("node-1")))
+                    .thenReturn(mockResult);
         }
 
         @Test

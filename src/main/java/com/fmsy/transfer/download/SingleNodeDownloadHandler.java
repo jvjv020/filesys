@@ -9,6 +9,8 @@ import com.fmsy.model.TransferConfig;
 import com.fmsy.transfer.BucketDistributor;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
+import com.fmsy.transfer.download.BucketProcessor.BucketBatchResult;
+import com.fmsy.transfer.download.BucketProcessor.BucketProcessingOptions;
 import static com.fmsy.transfer.TransferSupport.determineMainStatus;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.FilePathUtils;
@@ -19,18 +21,11 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.IntFunction;
 
 /**
  * DOWNLOAD_SINGLE_NODE 场景:按拆分字段分桶,每个桶生成一个文件,并行下载到同一节点 FTP。
  *
- * <p>桶的并行处理委托 {@link DownloadSupport#executePipeline} 执行单文件管线,
+ * <p>桶的并行处理委托 {@link BucketProcessor#processAll} 执行,
  * Handler 负责顶层 preCheck、分桶、总标志文件和聚合后稽核。
  */
 @Slf4j
@@ -38,10 +33,10 @@ import java.util.function.IntFunction;
 @RequiredArgsConstructor
 public class SingleNodeDownloadHandler implements TransferHandler {
 
-    private final DownloadSupport downloadSupport;
+    private final BucketProcessor bucketProcessor;
     private final BucketDistributor bucketDistributor;
     private final TransferSupport transferSupport;
-    private final IntFunction<ExecutorService> batchExecutorFactory;
+    private final DownloadSupport downloadSupport;
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
@@ -97,25 +92,28 @@ public class SingleNodeDownloadHandler implements TransferHandler {
             }
         }
 
-        // ===== Phase 4: 并行桶处理(每桶通过管线执行) =====
-        BucketResult bucketResult = new BucketResult();
-        ConcurrentLinkedQueue<String> generatedFiles = new ConcurrentLinkedQueue<>();
-
+        // ===== Phase 4: 并行桶处理(每桶通过 BucketProcessor 执行管线) =====
         int concurrency = config.getConcurrency() != null ? config.getConcurrency() : 3;
-        ExecutorService bucketExecutor = batchExecutorFactory.apply(
-                Math.max(1, Math.min(buckets.size(), concurrency)));
-        try {
-            for (Detail bucket : buckets) {
-                bucketExecutor.execute(() -> processBucketParallel(
-                        bucket, command, config, baseFileInfo,
-                        bucketResult, generatedFiles));
-            }
-        } finally {
-            shutdownExecutor(bucketExecutor, command.getId());
-        }
+        BucketBatchResult br = bucketProcessor.processAll(buckets, config, baseFileInfo,
+                config.getFtpName(),
+                BucketProcessingOptions.builder()
+                        .pipelineCustomizer((pipelineOpts, bucket, fileInfo) -> {
+                            // BATCH 模式:用明细表的 auditCount
+                            if (command.getCommandType() == CommandType.BATCH) {
+                                Integer detailAudit = bucket.getAuditCount();
+                                if (detailAudit != null && detailAudit >= 0) {
+                                    pipelineOpts.setExpectedAuditCount(detailAudit);
+                                }
+                            }
+                            pipelineOpts.setEnablePreCheck(false);   // 顶层已做
+                            pipelineOpts.setEnablePostAudit(false);  // 聚合层做
+                        })
+                        .maxConcurrency(concurrency)
+                        .build(),
+                config.getNodeId());
 
         // ===== Phase 5: 总标志文件(仅在所有桶成功时生成) =====
-        if (bucketResult.allSuccess.get() && postOps != null && postOps.contains("TOTAL")) {
+        if (br.isAllSuccess() && postOps != null && postOps.contains("TOTAL")) {
             String totalFlagOps = FlagFileService.filterOpsByType(postOps, "TOTAL");
             if (totalFlagOps != null) {
                 transferSupport.executeWithClient(config.getFtpName(), postClient -> {
@@ -130,90 +128,19 @@ public class SingleNodeDownloadHandler implements TransferHandler {
             boolean postAuditOk = downloadSupport.postAudit(config, baseFileInfo.fullPath());
             if (!postAuditOk) {
                 log.error("Post-audit failed for command {}, rolling back {} generated file(s)",
-                        command.getId(), generatedFiles.size());
+                        command.getId(), br.getGeneratedFiles().size());
                 transferSupport.executeWithClient(config.getFtpName(), client -> {
-                    for (String f : generatedFiles) {
+                    for (String f : br.getGeneratedFiles()) {
                         DownloadSupport.rollbackAfterPostAuditFailure(client, f,
                                 "single-node download post-audit");
                     }
                     return null;
                 });
-                bucketResult.allSuccess.set(false);
-                bucketResult.failedCount.incrementAndGet();
+                br.forceFailure();
             }
         }
 
-        result.setOutcome(bucketResult.totalRecordCount.get(),
-                determineMainStatus(bucketResult.allSuccess.get(),
-                        bucketResult.failedCount.get(), bucketResult.skippedCount.get()), "");
-    }
-
-    private static void shutdownExecutor(ExecutorService executor, Long commandId) {
-        executor.shutdown();
-        try {
-            if (!executor.awaitTermination(1, TimeUnit.HOURS)) {
-                log.error("Bucket processing timed out for command: {}", commandId);
-                executor.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            executor.shutdownNow();
-        }
-    }
-
-    private static class BucketResult {
-        final AtomicInteger totalRecordCount = new AtomicInteger(0);
-        final AtomicInteger failedCount = new AtomicInteger(0);
-        final AtomicInteger skippedCount = new AtomicInteger(0);
-        final AtomicBoolean allSuccess = new AtomicBoolean(true);
-    }
-
-    /**
-     * 并行处理单个桶 — 委托 {@link DownloadSupport#executePipeline} 执行单文件下载管线。
-     */
-    private void processBucketParallel(Detail bucket, Command command, TransferConfig config,
-                                        ResolvedPath baseFileInfo,
-                                        BucketResult result, ConcurrentLinkedQueue<String> generatedFiles) {
-        String fieldValue = bucket.getFieldValue();
-        Map<String, String> context = transferSupport.buildContext(
-                null, config.getSplitFields(), fieldValue);
-        ResolvedPath targetFileInfo = transferSupport.resolveFilePath(
-                baseFileInfo.fullPath(), context);
-
-        // 确定预期稽核数:BATCH 模式用明细表的 auditCount,SERIAL 模式无每桶稽核
-        Integer auditCount = null;
-        if (command.getCommandType() == CommandType.BATCH) {
-            Integer detailAudit = bucket.getAuditCount();
-            if (detailAudit != null && detailAudit >= 0) {
-                auditCount = detailAudit;
-            }
-        }
-
-        DownloadSupport.PipelineOptions opts = DownloadSupport.PipelineOptions.builder()
-                .wholeTable(false)
-                .fieldValue(fieldValue)
-                .expectedAuditCount(auditCount)
-                .enablePreCheck(false)       // 顶层已做
-                .enableOverwriteCheck(false)
-                .enablePostAudit(false)      // 聚合层做
-                .postOpsFilter("SUB")       // 仅生成子标志文件
-                .detail(bucket)
-                .nodeId(config.getNodeId())
-                .build();
-
-        DownloadSupport.PipelineResult pr = downloadSupport.executePipeline(
-                config.getFtpName(), config, targetFileInfo, opts);
-
-        if (pr.isSuccess()) {
-            generatedFiles.add(targetFileInfo.fullPath());
-            result.totalRecordCount.addAndGet(pr.getRecordCount());
-        } else {
-            result.allSuccess.set(false);
-            if (ColumnNames.STATUS_SKIPPED.equals(pr.getStatus())) {
-                result.skippedCount.incrementAndGet();
-            } else {
-                result.failedCount.incrementAndGet();
-            }
-        }
+        result.setOutcome(br.getTotalRecordCount(),
+                br.determineStatus(), "");
     }
 }
