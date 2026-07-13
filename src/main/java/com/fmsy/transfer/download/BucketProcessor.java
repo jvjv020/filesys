@@ -3,6 +3,7 @@ package com.fmsy.transfer.download;
 import com.fmsy.model.Detail;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.transfer.TransferSupport;
+import com.fmsy.transfer.TransferUtils;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
 import lombok.Builder;
@@ -23,7 +24,7 @@ import java.util.function.IntFunction;
 /**
  * 桶处理器 — 将桶列表并行派发到 {@link DownloadSupport#executePipeline} 并聚合结果。
  *
- * <p>抽取自 {@link SingleNodeDownloadHandler} 和 {@link com.fmsy.polling.DetailPollingService}
+ * <p>抽取自 {@link SingleNodeDownloadHandler} 和 {@link com.fmsy.transfer.download.SChildCommandProcessor}
  * 中的桶级并行处理逻辑，消除两处 processBucket 重复代码。
  *
  * <p>每桶处理流程:
@@ -133,16 +134,7 @@ public class BucketProcessor {
     }
 
     private void shutdownExecutor(ExecutorService executor) {
-        executor.shutdown();
-        try {
-            if (!executor.awaitTermination(1, TimeUnit.HOURS)) {
-                log.error("BucketProcessor: processing timed out, forcing shutdown");
-                executor.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            executor.shutdownNow();
-        }
+        TransferUtils.shutdownExecutor(executor, 1, TimeUnit.HOURS, "BucketProcessor");
     }
 
     // ==================== 值类型 ====================

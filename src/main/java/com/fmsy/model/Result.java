@@ -38,7 +38,7 @@ import java.time.LocalDateTime;
  * }
  * </pre>
  *
- * <p>对需要一次性填齐 14 列持久化字段的场景(典型如 polling/DetailPollingService 直接写结果行),
+ * <p>对需要一次性填齐 14 列持久化字段的场景(典型如 transfer/download/SChildCommandProcessor 直接写结果行),
  * 可用 {@link #builder()} 走 fluent API 构造:
  * <pre>
  * Result result = Result.builder()
@@ -187,7 +187,7 @@ public class Result {
 
     /**
      * 创建 Result Builder — 适用于不经过 Orchestrator 编排、直接组装结果行的场景
-     * (典型如 {@code polling/DetailPollingService} 在子命令结束时写结果行)。
+     * (典型如 {@code transfer/download/SChildCommandProcessor} 在子命令结束时写结果行)。
      *
      * <p>对应 14 列持久化字段 + dbName 路由字段。每个 setter 返回 {@code this},支持链式调用。
      * 运行时方法(markStart / setOutcome / markEnd / failWith 等)不在 Builder 中,

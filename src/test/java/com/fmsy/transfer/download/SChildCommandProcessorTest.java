@@ -1,4 +1,4 @@
-package com.fmsy.polling;
+package com.fmsy.transfer.download;
 
 import com.fmsy.config.AppConfig;
 import com.fmsy.enums.CommandType;
@@ -15,7 +15,6 @@ import com.fmsy.repository.ResultRepository;
 import com.fmsy.transfer.BucketDistributor;
 import com.fmsy.transfer.TempTransferConfigFactory;
 import com.fmsy.transfer.TransferSupport;
-import com.fmsy.transfer.download.BucketProcessor;
 import com.fmsy.transfer.download.BucketProcessor.BucketBatchResult;
 import com.fmsy.transfer.download.BucketProcessor.BucketProcessingOptions;
 import com.fmsy.util.ColumnNames;
@@ -40,8 +39,8 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-@DisplayName("DetailPollingService Tests")
-class DetailPollingServiceTest {
+@DisplayName("SChildCommandProcessor Tests")
+class SChildCommandProcessorTest {
 
     @Mock
     private DetailRepository detailRepository;
@@ -79,7 +78,7 @@ class DetailPollingServiceTest {
     @Mock
     private ShutdownService shutdownService;
 
-    private DetailPollingService detailPollingService;
+    private SChildCommandProcessor processor;
 
     @BeforeEach
     void setUp() {
@@ -89,7 +88,7 @@ class DetailPollingServiceTest {
         when(downloadConfig.getMaxPollIterations()).thenReturn(1000);
         when(pollingConfig.getTaskTimeoutHours()).thenReturn(1);
 
-        detailPollingService = new DetailPollingService(
+        processor = new SChildCommandProcessor(
                 detailRepository, bucketDistributor,
                 configLoader, commandRepository, tempConfigFactory,
                 appConfig, transferSupport, resultRepository,
@@ -142,7 +141,7 @@ class DetailPollingServiceTest {
             when(configLoader.getConfigOrDefault("CAT1", "CTRL1")).thenReturn(null);
             when(commandRepository.findById(100L)).thenReturn(null);
 
-            detailPollingService.pollAndProcess("node1", "100", subCmd);
+            processor.pollAndProcess("node1", "100", subCmd);
 
             // writeSubCommandResult is called both explicitly and in the finally block
             verify(resultRepository, atLeast(1)).insert(any(Result.class));
@@ -159,7 +158,7 @@ class DetailPollingServiceTest {
             when(commandRepository.findById(100L)).thenReturn(mainCmd);
             when(tempConfigFactory.build(mainCmd)).thenReturn(config);
 
-            detailPollingService.pollAndProcess("node1", "100", subCmd);
+            processor.pollAndProcess("node1", "100", subCmd);
 
             verify(tempConfigFactory).build(mainCmd);
         }
@@ -170,7 +169,7 @@ class DetailPollingServiceTest {
             Command subCmd = createSubCommand(10L, "CAT1", "CTRL1", CommandType.COORDINATED, "noPipeHere");
             when(configLoader.getConfigOrDefault("CAT1", "CTRL1")).thenReturn(null);
 
-            detailPollingService.pollAndProcess("node1", "100", subCmd);
+            processor.pollAndProcess("node1", "100", subCmd);
 
             verify(resultRepository, atLeast(1)).insert(any(Result.class));
         }
@@ -184,7 +183,7 @@ class DetailPollingServiceTest {
             // No more buckets so it completes quickly
             when(detailRepository.findReadyBuckets(100L, 3)).thenReturn(new ArrayList<>());
 
-            detailPollingService.pollAndProcess("node1", "100", subCmd);
+            processor.pollAndProcess("node1", "100", subCmd);
 
             assertNotNull(subCmd.getStartTime());
         }
@@ -216,7 +215,7 @@ class DetailPollingServiceTest {
                     eq("ftp1"), any(BucketProcessingOptions.class), eq("node1")))
                     .thenReturn(mockResult);
 
-            detailPollingService.pollAndProcess("node1", "100", subCmd);
+            processor.pollAndProcess("node1", "100", subCmd);
 
             verify(bucketProcessor).processAll(eq(List.of(bucket)), eq(config), any(ResolvedPath.class),
                     eq("ftp1"), any(BucketProcessingOptions.class), eq("node1"));
@@ -231,7 +230,7 @@ class DetailPollingServiceTest {
             when(configLoader.getConfigOrDefault("CAT1", "CTRL1")).thenReturn(config);
             when(shutdownService.isShuttingDown()).thenReturn(true);
 
-            detailPollingService.pollAndProcess("node1", "100", subCmd);
+            processor.pollAndProcess("node1", "100", subCmd);
 
             verify(detailRepository, never()).findReadyBuckets(anyLong(), anyInt());
         }
@@ -244,7 +243,7 @@ class DetailPollingServiceTest {
             when(configLoader.getConfigOrDefault("CAT1", "CTRL1")).thenReturn(config);
             when(shutdownService.isShuttingDown()).thenReturn(false);
 
-            detailPollingService.pollAndProcess("node1", "100", subCmd);
+            processor.pollAndProcess("node1", "100", subCmd);
 
             verify(resultRepository).insert(any(Result.class));
         }
@@ -257,7 +256,7 @@ class DetailPollingServiceTest {
             when(configLoader.getConfigOrDefault("CAT1", "CTRL1")).thenReturn(config);
             when(detailRepository.findReadyBuckets(100L, 3)).thenThrow(new RuntimeException("DB error"));
 
-            detailPollingService.pollAndProcess("node1", "100", subCmd);
+            processor.pollAndProcess("node1", "100", subCmd);
 
             verify(resultRepository).insert(any(Result.class));
         }
@@ -306,10 +305,10 @@ class DetailPollingServiceTest {
     /** Reflection helper for determineSubCommandResult */
     private String invokeDetermineResult(int success, int failed, int skipped) {
         try {
-            var method = DetailPollingService.class.getDeclaredMethod(
+            var method = SChildCommandProcessor.class.getDeclaredMethod(
                     "determineSubCommandResult", int.class, int.class, int.class);
             method.setAccessible(true);
-            return (String) method.invoke(detailPollingService, failed, skipped, success);
+            return (String) method.invoke(processor, failed, skipped, success);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -326,11 +325,11 @@ class DetailPollingServiceTest {
             TransferConfig config = createDownloadConfig();
 
             try {
-                var method = DetailPollingService.class.getDeclaredMethod(
+                var method = SChildCommandProcessor.class.getDeclaredMethod(
                         "writeSubCommandResult", Command.class, long.class, TransferConfig.class,
                         int.class, int.class, int.class, int.class);
                 method.setAccessible(true);
-                method.invoke(detailPollingService, subCmd, System.currentTimeMillis() - 1000,
+                method.invoke(processor, subCmd, System.currentTimeMillis() - 1000,
                         config, 3, 2, 1, 0);
             } catch (Exception e) {
                 throw new RuntimeException(e);
@@ -345,11 +344,11 @@ class DetailPollingServiceTest {
             Command subCmd = createSubCommand(10L, "CAT1", "CTRL1", CommandType.COORDINATED, "100|/base/path");
 
             try {
-                var method = DetailPollingService.class.getDeclaredMethod(
+                var method = SChildCommandProcessor.class.getDeclaredMethod(
                         "writeSubCommandResult", Command.class, long.class, TransferConfig.class,
                         int.class, int.class, int.class, int.class);
                 method.setAccessible(true);
-                method.invoke(detailPollingService, subCmd, System.currentTimeMillis() - 1000,
+                method.invoke(processor, subCmd, System.currentTimeMillis() - 1000,
                         null, 0, 0, 0, 0);
             } catch (Exception e) {
                 throw new RuntimeException(e);

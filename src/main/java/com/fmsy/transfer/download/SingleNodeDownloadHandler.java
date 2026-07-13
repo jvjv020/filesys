@@ -117,7 +117,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
             String totalFlagOps = FlagFileService.filterOpsByType(postOps, "TOTAL");
             if (totalFlagOps != null) {
                 transferSupport.executeWithClient(config.getFtpName(), postClient -> {
-                    transferSupport.postProcess(postClient, totalFlagOps, baseFileInfo);
+                    transferSupport.postProcess(postClient, totalFlagOps, baseFileInfo, null);
                     return null;
                 });
             }

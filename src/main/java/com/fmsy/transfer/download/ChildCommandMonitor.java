@@ -232,7 +232,7 @@ public class ChildCommandMonitor {
                     log.info("Generating total flag for main command: {}", mainCommandId);
                     ResolvedPath fileInfo = ResolvedPath.of(config.getFilePath());
                     ftpPool.withClient(config.getFtpName(), client -> {
-                        transferSupport.postProcess(client, totalFlagOnlyOps, fileInfo);
+                        transferSupport.postProcess(client, totalFlagOnlyOps, fileInfo, null);
                     });
                 }
             }

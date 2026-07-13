@@ -21,7 +21,7 @@ import java.util.Map;
  *   <li>{@code transfer/BucketDistributor} — competeBucket / countEmptyBuckets / createBuckets</li>
  *   <li>{@code transfer/upload/MultiUploadHandler} — findUploadDetails</li>
  *   <li>{@code transfer/download/MultiNodeDownloadHandler} — updateAuditCount</li>
- *   <li>{@code polling/DetailPollingService} — findBucketData(动态表名,见 TargetTableRepository)</li>
+ *   <li>{@code transfer/download/SChildCommandProcessor} — findBucketData(动态表名,见 TargetTableRepository)</li>
  * </ul>
  */
 @Slf4j

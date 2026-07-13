@@ -143,7 +143,7 @@ public class MultiUploadHandler implements TransferHandler {
         ResolvedPath finalLastFileInfo = lastFileInfo;
         try {
             transferSupport.executeWithClient(ftpName, client -> {
-                transferSupport.postProcess(client, config, finalLastFileInfo != null ? finalLastFileInfo : dirInfo, finalTotalRecords);
+                transferSupport.postProcess(client, config, finalLastFileInfo != null ? finalLastFileInfo : dirInfo, Map.of("C", String.valueOf(finalTotalRecords)));
                 return null;
             });
         } catch (Exception e) {
@@ -352,7 +352,7 @@ public class MultiUploadHandler implements TransferHandler {
         int finalTotalRecords = totalRecords;
         try {
             transferSupport.executeWithClient(ftpName, client -> {
-                transferSupport.postProcess(client, config, finalLastFileInfo, finalTotalRecords);
+                transferSupport.postProcess(client, config, finalLastFileInfo, Map.of("C", String.valueOf(finalTotalRecords)));
                 return null;
             });
         } catch (Exception e) {

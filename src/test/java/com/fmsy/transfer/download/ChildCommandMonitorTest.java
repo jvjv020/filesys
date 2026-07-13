@@ -210,7 +210,7 @@ class ChildCommandMonitorTest {
             TimeUnit.MILLISECONDS.sleep(500);
 
             verify(transferSupport).postProcess(any(), anyString(),
-                    any(com.fmsy.util.ResolvedPath.class));
+                    any(com.fmsy.util.ResolvedPath.class), any());
         }
     }
 

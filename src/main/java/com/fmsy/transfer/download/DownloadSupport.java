@@ -26,6 +26,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.OutputStream;
+import java.util.Map;
 
 /**
  * 下载场景 Support — 跨 3 个 Download Handler 共享的下载协议方法 + 单文件下载管线。
@@ -42,7 +43,7 @@ import java.io.OutputStream;
  * <ul>
  *   <li>{@link SingleDownloadHandler} — 整表模式,开启全部阶段</li>
  *   <li>{@link SingleNodeDownloadHandler} — 分桶模式,跳过前操作/后稽核(聚合层做)</li>
- *   <li>{@link com.fmsy.polling.DetailPollingService} — 分桶模式,开启前操作+后稽核</li>
+ *   <li>{@link com.fmsy.transfer.download.SChildCommandProcessor} — 分桶模式,开启前操作+后稽核</li>
  * </ul>
  */
 @Slf4j
@@ -78,105 +79,88 @@ public class DownloadSupport {
         log.debug("Pipeline start: ftp={}, path={}, wholeTable={}, fieldValue={}",
                 ftpName, filePath, opts.wholeTable, opts.fieldValue);
 
-        // ---- Phase 1: 前稽核 (DB-only) ----
-        int recordCount;
+        // Phase 1: 前稽核 / 计数 (DB-only)
+        int recordCount = resolveRecordCount(config, opts);
+        if (recordCount < 0) {
+            log.warn("Pre-audit failed for {}, auditCount={}", filePath, opts.expectedAuditCount);
+            updateDetailStatus(opts, ColumnNames.STATUS_SKIPPED);
+            return new PipelineResult(0, false, ColumnNames.STATUS_SKIPPED, filePath);
+        }
+
+        // Phase 2: 空数据处理
+        PipelineResult emptyResult = handleEmptyDataIfNeeded(config, opts, recordCount, filePath);
+        if (emptyResult != null) return emptyResult;
+
+        // Phase 3-5: FTP 传输 + 后稽核 + 状态更新
+        return executeFtpPipeline(ftpName, config, targetFile, opts, recordCount, filePath);
+    }
+
+    // ==================== Phase 方法 ====================
+
+    /**
+     * Phase 1: 前稽核或计数 — 返回实际记录数；-1 表示稽核不通过。
+     */
+    private int resolveRecordCount(TransferConfig config, PipelineOptions opts) {
         if (opts.expectedAuditCount != null && opts.expectedAuditCount >= 0) {
-            if (opts.wholeTable) {
-                recordCount = preAudit(config, opts.expectedAuditCount);
-            } else {
-                recordCount = preAuditByBucket(config, opts.expectedAuditCount, opts.fieldValue);
-            }
-            if (recordCount < 0) {
-                log.warn("Pre-audit failed for {}, auditCount={}", filePath, opts.expectedAuditCount);
-                updateDetailStatus(opts, ColumnNames.STATUS_SKIPPED);
-                return new PipelineResult(0, false, ColumnNames.STATUS_SKIPPED, filePath);
-            }
-        } else {
-            if (opts.wholeTable) {
-                recordCount = countRecords(config);
-            } else {
-                recordCount = targetTableRepository.countByBucket(
+            int count = opts.wholeTable
+                    ? preAudit(config, opts.expectedAuditCount)
+                    : preAuditByBucket(config, opts.expectedAuditCount, opts.fieldValue);
+            return count < 0 ? -1 : count;
+        }
+        return opts.wholeTable
+                ? countRecords(config)
+                : targetTableRepository.countByBucket(
                         config.getDbName(), config.getTableName(),
                         config.getSplitFields(), opts.fieldValue);
-            }
-        }
+    }
 
-        // ---- Phase 2: 空数据处理 ----
-        if (recordCount == 0 && !transferSupport.handleEmptyData(0, config.getEmptyDataHandling())) {
-            String status = config.getEmptyDataHandling() == EmptyDataHandling.ERROR
-                    ? ColumnNames.STATUS_ERROR : ColumnNames.STATUS_SKIPPED;
-            log.warn("Empty data handling ({}) for {}", config.getEmptyDataHandling(), filePath);
-            updateDetailStatus(opts, status);
-            return new PipelineResult(0, false, status, filePath);
-        }
+    /**
+     * Phase 2: 空数据处理 — 记录数为 0 且配置不允许空数据时返回错误/跳过结果。
+     */
+    private PipelineResult handleEmptyDataIfNeeded(TransferConfig config, PipelineOptions opts,
+                                                   int recordCount, String filePath) {
+        if (recordCount > 0) return null;
+        if (transferSupport.handleEmptyData(0, config.getEmptyDataHandling())) return null;
 
-        // ---- Phase 3: FTP 传输 (单个会话) ----
+        String status = config.getEmptyDataHandling() == EmptyDataHandling.ERROR
+                ? ColumnNames.STATUS_ERROR : ColumnNames.STATUS_SKIPPED;
+        log.warn("Empty data handling ({}) for {}", config.getEmptyDataHandling(), filePath);
+        updateDetailStatus(opts, status);
+        return new PipelineResult(0, false, status, filePath);
+    }
+
+    /**
+     * Phase 3-5: 在 FTP 会话中执行前操作 → 生成文件 → 后操作 → 后稽核 → 状态更新。
+     */
+    private PipelineResult executeFtpPipeline(String ftpName, TransferConfig config,
+                                              ResolvedPath targetFile, PipelineOptions opts,
+                                              int recordCount, String filePath) {
         FtpClient client = null;
         try {
             client = ftpPool.getClient(ftpName);
 
             // 3a: 前操作
-            if (opts.enablePreCheck) {
-                if (!transferSupport.preCheck(client, config, targetFile)) {
-                    log.warn("Pre-check failed for {}", filePath);
-                    updateDetailStatus(opts, ColumnNames.STATUS_SKIPPED);
-                    return new PipelineResult(0, false, ColumnNames.STATUS_SKIPPED, filePath);
-                }
-                String parentDir = FilePathUtils.extractParentDirectory(filePath);
-                if (parentDir != null && !parentDir.isEmpty()) {
-                    client.mkdirs(parentDir);
-                }
-            }
+            PipelineResult preCheckResult = phase3aPreCheck(client, config, targetFile, opts, filePath);
+            if (preCheckResult != null) return preCheckResult;
 
             // 3b: 覆盖检查(可选)
-            if (opts.enableOverwriteCheck) {
-                if (!checkOverwriteAllowed(client, filePath, config.getOverwriteFlag())) {
-                    log.warn("Overwrite denied for {}", filePath);
-                    updateDetailStatus(opts, ColumnNames.STATUS_ERROR);
-                    return new PipelineResult(0, false, ColumnNames.STATUS_ERROR, filePath);
-                }
-            }
+            PipelineResult overwriteResult = phase3bOverwriteCheck(client, config, opts, filePath);
+            if (overwriteResult != null) return overwriteResult;
 
             // 3c: 生成文件
-            FileConverter converter = converterFactory.get(config.getParserType());
-            FieldMapping mapping = fieldMappingBuilder.buildForDownload(config);
-
-            int count;
-            try (OutputStream os = client.getOutputStream(filePath)) {
-                if (opts.wholeTable) {
-                    count = parallelFileGenerator.generate(
-                            os, config, converter, mapping, recordCount);
-                } else {
-                    try (var data = targetTableRepository.streamBucketData(
-                            config.getDbName(), config.getTableName(),
-                            config.getSplitFields(), opts.fieldValue)) {
-                        converter.generate(os, data, mapping);
-                    }
-                    count = recordCount;
-                }
-                client.completePendingCommand();
-            }
+            int count = phase3cGenerateFile(client, config, opts, recordCount, filePath);
 
             // 3d: 后操作
-            String postOps = resolvePostOps(config, opts);
-            if (postOps != null && !postOps.isEmpty()) {
-                transferSupport.postProcess(client, postOps, targetFile, count);
-            }
+            phase3dPostProcess(client, config, opts, targetFile, count);
 
             client.close();
             client = null;
 
-            // ---- Phase 4: 后稽核 ----
-            if (opts.enablePostAudit) {
-                if (!postAudit(config, filePath, count)) {
-                    log.error("Post-audit failed for {}, rolling back file", filePath);
-                    rollbackFile(ftpName, filePath);
-                    updateDetailStatus(opts, ColumnNames.STATUS_ERROR);
-                    return new PipelineResult(count, false, ColumnNames.STATUS_ERROR, filePath);
-                }
-            }
+            // Phase 4: 后稽核
+            PipelineResult postAuditResult = phase4PostAudit(config, opts, ftpName, filePath, count);
+            if (postAuditResult != null) return postAuditResult;
 
-            // ---- Phase 5: 更新 Detail 状态 ----
+            // Phase 5: 更新 Detail 状态
             updateDetailStatus(opts, ColumnNames.STATUS_SUCCESS);
 
             log.info("Pipeline completed: {}, records={}", filePath, count);
@@ -191,6 +175,80 @@ public class DownloadSupport {
                 client.close();
             }
         }
+    }
+
+    /** 3a: 前操作 — READY/FLAG 检查 + 目录创建。 */
+    private PipelineResult phase3aPreCheck(FtpClient client, TransferConfig config,
+                                           ResolvedPath targetFile, PipelineOptions opts,
+                                           String filePath) {
+        if (!opts.enablePreCheck) return null;
+        if (!transferSupport.preCheck(client, config, targetFile)) {
+            log.warn("Pre-check failed for {}", filePath);
+            updateDetailStatus(opts, ColumnNames.STATUS_SKIPPED);
+            return new PipelineResult(0, false, ColumnNames.STATUS_SKIPPED, filePath);
+        }
+        String parentDir = FilePathUtils.extractParentDirectory(filePath);
+        if (parentDir != null && !parentDir.isEmpty()) {
+            client.mkdirs(parentDir);
+        }
+        return null;
+    }
+
+    /** 3b: 覆盖检查 — 目标文件存在且不允许覆盖时返回错误。 */
+    private PipelineResult phase3bOverwriteCheck(FtpClient client, TransferConfig config,
+                                                 PipelineOptions opts, String filePath) {
+        if (!opts.enableOverwriteCheck) return null;
+        if (!checkOverwriteAllowed(client, filePath, config.getOverwriteFlag())) {
+            log.warn("Overwrite denied for {}", filePath);
+            updateDetailStatus(opts, ColumnNames.STATUS_ERROR);
+            return new PipelineResult(0, false, ColumnNames.STATUS_ERROR, filePath);
+        }
+        return null;
+    }
+
+    /** 3c: 生成文件 — 整表或分桶模式，返回写入记录数。 */
+    private int phase3cGenerateFile(FtpClient client, TransferConfig config,
+                                    PipelineOptions opts, int recordCount,
+                                    String filePath) throws Exception {
+        FileConverter converter = converterFactory.get(config.getParserType());
+        FieldMapping mapping = fieldMappingBuilder.buildForDownload(config);
+
+        try (OutputStream os = client.getOutputStream(filePath)) {
+            if (opts.wholeTable) {
+                return parallelFileGenerator.generate(os, config, converter, mapping, recordCount);
+            }
+            try (var data = targetTableRepository.streamBucketData(
+                    config.getDbName(), config.getTableName(),
+                    config.getSplitFields(), opts.fieldValue)) {
+                converter.generate(os, data, mapping);
+            }
+            return recordCount;
+        } finally {
+            client.completePendingCommand();
+        }
+    }
+
+    /** 3d: 后操作 — 写入 SUB/FB/TOTAL 等标志文件。 */
+    private void phase3dPostProcess(FtpClient client, TransferConfig config,
+                                    PipelineOptions opts, ResolvedPath targetFile,
+                                    int count) {
+        String postOps = resolvePostOps(config, opts);
+        if (postOps != null && !postOps.isEmpty()) {
+            transferSupport.postProcess(client, postOps, targetFile, Map.of("C", String.valueOf(count)));
+        }
+    }
+
+    /** Phase 4: 后稽核 — 文件行数与 DB 记录数比对。 */
+    private PipelineResult phase4PostAudit(TransferConfig config, PipelineOptions opts,
+                                           String ftpName, String filePath, int count) {
+        if (!opts.enablePostAudit) return null;
+        if (!postAudit(config, filePath, count)) {
+            log.error("Post-audit failed for {}, rolling back file", filePath);
+            rollbackFile(ftpName, filePath);
+            updateDetailStatus(opts, ColumnNames.STATUS_ERROR);
+            return new PipelineResult(count, false, ColumnNames.STATUS_ERROR, filePath);
+        }
+        return null;
     }
 
     /** 解析后操作字符串:按 postOpsFilter 过滤 config 的后操作列表。 */
@@ -305,12 +363,6 @@ public class DownloadSupport {
         return true;
     }
 
-    /**
-     * P0 #1:根据桶/文件汇总结果判定主指令最终状态。
-     */
-    public static String determineMainStatus(boolean allSuccess, int failedCount, int skippedCount) {
-        return TransferSupport.determineMainStatus(allSuccess, failedCount, skippedCount);
-    }
 
     /**
      * 后审计失败回滚 - 删除 FTP 上已生成的目标文件。

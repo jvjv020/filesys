@@ -26,12 +26,13 @@
 | `MultiUploadHandler` | UPLOAD_MULTI（SERIAL 模式目录通配符并发 + BATCH 模式明细表顺序） |
 | `SingleDownloadHandler` | DOWNLOAD_SINGLE |
 | `SingleNodeDownloadHandler` | DOWNLOAD_SINGLE_NODE（并行桶处理 + 总标志文件） |
-| `MultiNodeDownloadHandler` | DOWNLOAD_MULTI_NODE（创建 S 子命令，不参与子命令执行） |
+| `MultiNodeDownloadHandler` | DOWNLOAD_MULTI_NODE（创建 S 子命令 + preCheck） |
 
 ### 下载子包（`transfer/download/`）
 | 类 | 角色 |
 |---|------|
 | `ChildCommandMonitor` | 后台线程监控 S 子命令完成情况，汇总写 TOTAL_FLAG |
+| `SChildCommandProcessor` | S 型子命令桶处理（竞争 → 下载管线 → 写结果），替代原 polling/DetailPollingService |
 | `ParallelFileGenerator` | 按分区并行读取 DB → 临时文件 → 顺序拼接 |
 
 ### 上传子包（`transfer/upload/`）
@@ -50,7 +51,7 @@
 | `TransferUtils` | — |
 
 ## 设计要点
-- **COORDINATED(S) 类型的 DOWNLOAD_MULTI_NODE** 不由 TransferOrchestrator 处理，由 TransferService 直转 DetailPollingService
+- **COORDINATED(S) 类型的 DOWNLOAD_MULTI_NODE** 不由 TransferOrchestrator 处理，由 TransferService 直转 SChildCommandProcessor
 - Handler 不持有 FTP 连接跨越 Phase 边界，各 Phase 间释放连接
 - `ParallelFileGenerator`：分区并行 → 流水线拼接，非分区表自动降级串行
 - 所有流式查询通过 `DataStream` / `CloseableIterator`，禁止 `List` 收集

@@ -108,10 +108,10 @@ public class TransferSupport {
     }
 
     /**
-     * 后置处理 — 委托给 FlagFileService.process。
+     * 后置处理 — 从 config 读取后操作字符串，委托给 FlagFileService.process。
      *
      * @param fileInfo    数据文件的 ResolvedPath，用于路径继承和内容变量
-     * @param extraValues 额外运行时值（如 C=记录数），可为 null
+     * @param extraValues 额外运行时值（如 {"C": "1234"}），可为 null
      */
     public void postProcess(FtpClient client, TransferConfig config,
                              ResolvedPath fileInfo, Map<String, String> extraValues) {
@@ -122,43 +122,16 @@ public class TransferSupport {
     }
 
     /**
-     * 后置处理 — 简写版本，自动将 recordCount 设为 C 值。
-     */
-    public void postProcess(FtpClient client, TransferConfig config,
-                             ResolvedPath fileInfo, int recordCount) {
-        Map<String, String> extra = new HashMap<>(1);
-        extra.put("C", String.valueOf(recordCount));
-        postProcess(client, config, fileInfo, extra);
-    }
-
-    /**
-     * 后置处理 — 使用显式操作字符串（不走 config），供 SingleNodeDownloadHandler 等需要按类型过滤的场景。
+     * 后置处理 — 使用显式操作字符串（不走 config），供按类型过滤后（filterOpsByType）的场景。
      *
-     * @param postOps 显式后置操作字符串（例如 filterOpsByType 的输出），为 null/空时不执行
+     * @param postOps     显式后置操作字符串，为 null/空时不执行
+     * @param extraValues 额外运行时值（如 {"C": "1234"}），可为 null
      */
     public void postProcess(FtpClient client, String postOps,
                              ResolvedPath fileInfo, Map<String, String> extraValues) {
         if (postOps != null && !postOps.isEmpty()) {
             flagFileService.process(client, postOps, fileInfo, extraValues);
         }
-    }
-
-    /**
-     * 后置处理 — 显式操作字符串，无额外值（用于 TOTAL 等不需要 C 值的场景）。
-     */
-    public void postProcess(FtpClient client, String postOps,
-                             ResolvedPath fileInfo) {
-        postProcess(client, postOps, fileInfo, (Map<String, String>) null);
-    }
-
-    /**
-     * 后置处理 — 显式操作字符串 + recordCount 简写版。
-     */
-    public void postProcess(FtpClient client, String postOps,
-                             ResolvedPath fileInfo, int recordCount) {
-        Map<String, String> extra = new HashMap<>(1);
-        extra.put("C", String.valueOf(recordCount));
-        postProcess(client, postOps, fileInfo, extra);
     }
 
     /**

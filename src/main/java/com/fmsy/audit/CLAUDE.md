@@ -25,6 +25,6 @@
 - DOWNLOAD：DB 记录数 vs 文件行数（`knownDbCount >= 0` 时复用传入值，避免重复 COUNT）
 
 ## 设计约束
-- `AuditScenario` 当前仅 DOWNLOAD 分支被引用（`DownloadSupport` / `DetailPollingService`）
+- `AuditScenario` 当前仅 DOWNLOAD 分支被引用（`DownloadSupport` / `SChildCommandProcessor`）
 - UPLOAD 分支保留为协议占位，`UploadSupport` 直接实现自己的审计逻辑
 - 不要通过 `new AuditScenario()` 创建实例

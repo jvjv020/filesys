@@ -23,7 +23,7 @@ import org.springframework.stereotype.Component;
  *   <li>失败:result.markChildrenFailed(reason)(主命令置 ERROR,不启 monitor)</li>
  * </ul>
  *
- * <p>子命令的并发执行由 DetailPollingService 接管(本 Handler 不参与)。
+ * <p>子命令的并发执行由 {@link SChildCommandProcessor} 接管(本 Handler 不参与)。
  *
  * <p>preCheck 用短生命周期 FTP 连接,完成后立即归还;
  * createChildren 为纯 DB 操作时不持有 FTP 连接。

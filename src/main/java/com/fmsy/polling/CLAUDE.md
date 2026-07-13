@@ -9,7 +9,7 @@
 |---|------|
 | `PollingService` | 轮询入口，`@Scheduled(fixedDelay)` 驱动每轮轮询 |
 | `BatchDispatcher` | 单轮派发器（约束检查 → 竞争 → 配置查询 → submit） |
-| `DetailPollingService` | S 型子命令（桶）轮询处理 |
+| ~~`DetailPollingService`~~ | ~~S 型子命令（桶）轮询处理~~ |
 | `SerialConstraintChecker` | 串行约束检查 |
 | `CommandProcessingTracker` | 处理中命令跟踪器（内存串行约束） |
 
@@ -24,6 +24,7 @@
 - `ShutdownService.beginTask()/endTask()` 包裹每个提交，确保优雅关闭可等待
 
 ## 桶竞争流程（DOWNLOAD_MULTI_NODE）
-1. `DetailPollingService.pollAndProcess()` — 外层循环按批次拉取待处理桶
-2. 每批次独立线程池并行处理桶
-3. 每个桶：原子竞争 → 预审计 → 空数据处理 → 查询数据 → 生成文件 → 后处理 → 后审计
+
+S 型子命令（桶）处理已移至 `transfer/download/SChildCommandProcessor`，
+与 `MultiNodeDownloadHandler`、`ChildCommandMonitor` 同属 `transfer/download` 包，
+实现 DOWNLOAD_MULTI_NODE 全流程紧凑协作。

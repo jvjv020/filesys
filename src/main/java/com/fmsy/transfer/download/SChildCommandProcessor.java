@@ -1,4 +1,4 @@
-package com.fmsy.polling;
+package com.fmsy.transfer.download;
 
 import com.fmsy.config.AppConfig;
 import com.fmsy.enums.CommandType;
@@ -14,10 +14,8 @@ import com.fmsy.repository.ResultRepository;
 import com.fmsy.transfer.BucketDistributor;
 import com.fmsy.transfer.TempTransferConfigFactory;
 import com.fmsy.transfer.TransferSupport;
-import com.fmsy.transfer.download.BucketProcessor;
 import com.fmsy.transfer.download.BucketProcessor.BucketBatchResult;
 import com.fmsy.transfer.download.BucketProcessor.BucketProcessingOptions;
-import com.fmsy.transfer.download.DownloadSupport;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.LogUtils;
 import com.fmsy.util.ResolvedPath;
@@ -31,22 +29,22 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 明细轮询服务 - S型子命令处理
+ * S 型子命令处理器 — 处理 DOWNLOAD_MULTI_NODE 场景下由主命令拆分的 S 型子命令（桶）。
  *
- * 功能说明：
- * - 被主线程调用，处理DOWNLOAD_MULTI_NODE场景下的S型子命令
- * - 从明细表获取待处理的桶，竞争处理权后委托 {@link BucketProcessor} 并行处理
- * - 各节点通过竞争机制分配桶，避免重复处理
+ * <p>各节点通过原子竞争获取桶的处理权，委托 {@link BucketProcessor} 并行处理。
+ * 同一子命令的所有桶由本处理器统一调度，与之前/之后子命令的桶互不干扰。
  *
- * 线程模型：
- * - 每次 pollAndProcess 调用创建一个新的 ExecutorService
- * - 每个桶独立 Runnable 提交到该池,主线程 awaitTermination 等所有桶完成
- * - 与 PollingService 批次隔离原则一致:同一子命令的所有桶共享本池,与之前/之后子命令的桶不共用
+ * <p>本类与 {@link MultiNodeDownloadHandler}（创建子命令）、
+ * {@link ChildCommandMonitor}（后台监控汇总）共同完成 DOWNLOAD_MULTI_NODE 全流程，
+ * 三者在同一包内紧密协作。
+ *
+ * <p>调用入口：{@link com.fmsy.transfer.TransferService} 对 COORDINATED(S) 类型的下载命令
+ * 直转此类处理。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class DetailPollingService {
+public class SChildCommandProcessor {
 
     private final DetailRepository detailRepository;
     private final BucketDistributor bucketDistributor;
@@ -60,7 +58,11 @@ public class DetailPollingService {
     private final ShutdownService shutdownService;
 
     /**
-     * 轮询并处理S型子命令分配的桶(并行版本 + 外层竞争循环)
+     * 轮询并处理 S 型子命令分配的桶（并行版本 + 外层竞争循环）
+     *
+     * @param nodeId        本节点 ID
+     * @param mainCommandId 主命令 ID（字符串格式，用于日志和查询）
+     * @param subCommand    S 型子命令对象
      */
     public void pollAndProcess(String nodeId, String mainCommandId, Command subCommand) {
         long startTime = System.currentTimeMillis();
@@ -213,6 +215,7 @@ public class DetailPollingService {
         return null;
     }
 
+    /** 根据桶的成败跳过计数确定子命令终态 */
     private String determineSubCommandResult(int failed, int skipped, int success) {
         if (success == 0 && failed == 0 && skipped == 0) return ColumnNames.STATUS_SKIPPED;
         if (failed > 0 && success == 0 && skipped == 0) return ColumnNames.STATUS_ERROR;

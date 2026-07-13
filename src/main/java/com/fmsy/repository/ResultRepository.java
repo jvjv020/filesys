@@ -49,7 +49,7 @@ public class ResultRepository {
 
     /**
      * 完整结果写入 — 实体承载全部字段(结果表 14 列 + 路由 dbName)。
-     * 由 Result.markEnd() / polling/DetailPollingService.writeSubCommandResult 等调用方组装。
+     * 由 Result.markEnd() / transfer/download/SChildCommandProcessor.writeSubCommandResult 等调用方组装。
      */
     public void insert(Result result) {
         JdbcTemplateWrapper jdbc = getJdbc(result.getDbName());

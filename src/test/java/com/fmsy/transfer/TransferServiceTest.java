@@ -5,7 +5,7 @@ import com.fmsy.enums.CommandType;
 import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.model.Command;
 import com.fmsy.model.TransferConfig;
-import com.fmsy.polling.DetailPollingService;
+import com.fmsy.transfer.download.SChildCommandProcessor;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.transfer.TransferOrchestrator;
 import com.fmsy.util.ColumnNames;
@@ -33,7 +33,7 @@ class TransferServiceTest {
     private ConfigLoaderService configLoader;
 
     @Mock
-    private DetailPollingService detailPollingService;
+    private SChildCommandProcessor sChildCommandProcessor;
 
     @Mock
     private AppConfig appConfig;
@@ -49,7 +49,7 @@ class TransferServiceTest {
     @BeforeEach
     void setUp() {
         transferService = new TransferService(transferOrchestrator, configLoader,
-                detailPollingService, appConfig, commandRepository, tempConfigFactory);
+                sChildCommandProcessor, appConfig, commandRepository, tempConfigFactory);
         when(appConfig.getNodeId()).thenReturn("node-1");
     }
 
@@ -169,8 +169,8 @@ class TransferServiceTest {
     class ProcessCoordinatedRouting {
 
         @Test
-        @DisplayName("should route COORDINATED commands to DetailPollingService")
-        void shouldRouteCoordinatedToDetailPollingService() {
+        @DisplayName("should route COORDINATED commands to SChildCommandProcessor")
+        void shouldRouteCoordinatedToSChildCommandProcessor() {
             Command command = new Command();
             command.setId(2L);
             command.setCategoryCode("CAT001");
@@ -187,7 +187,7 @@ class TransferServiceTest {
 
             transferService.process(2L, "DOWNLOAD");
 
-            verify(detailPollingService).pollAndProcess("node-1", "1", command);
+            verify(sChildCommandProcessor).pollAndProcess("node-1", "1", command);
             verifyNoInteractions(transferOrchestrator);
         }
 
@@ -210,7 +210,7 @@ class TransferServiceTest {
 
             transferService.process(3L, "DOWNLOAD");
 
-            verify(detailPollingService).pollAndProcess("node-1", "100", command);
+            verify(sChildCommandProcessor).pollAndProcess("node-1", "100", command);
         }
 
         @Test
@@ -232,12 +232,12 @@ class TransferServiceTest {
 
             transferService.process(4L, "DOWNLOAD");
 
-            verify(detailPollingService).pollAndProcess("node-1", "200", command);
+            verify(sChildCommandProcessor).pollAndProcess("node-1", "200", command);
         }
 
         @Test
-        @DisplayName("should NOT route COORDINATED to DetailPollingService for UPLOAD")
-        void shouldNotRouteCoordinatedUploadToDetailPollingService() throws Exception {
+        @DisplayName("should NOT route COORDINATED to SChildCommandProcessor for UPLOAD")
+        void shouldNotRouteCoordinatedUploadToSChildCommandProcessor() throws Exception {
             Command command = new Command();
             command.setId(5L);
             command.setCategoryCode("CAT001");
@@ -255,7 +255,7 @@ class TransferServiceTest {
 
             // Non-download COORDINATED goes to orchestrator
             verify(transferOrchestrator).execute(command, config);
-            verifyNoInteractions(detailPollingService);
+            verifyNoInteractions(sChildCommandProcessor);
         }
     }
 

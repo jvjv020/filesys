@@ -286,7 +286,7 @@ public class UploadSupport {
 
             // Phase 3: postProcess
             try {
-                transferSupport.postProcess(client, config, fileInfo, count);
+                transferSupport.postProcess(client, config, fileInfo, Map.of("C", String.valueOf(count)));
             } catch (Exception e) {
                 // postProcess失败不影响结果状态，仅记录
                 log.warn("Post-process failed for {}: {}", filePath, e.getMessage());

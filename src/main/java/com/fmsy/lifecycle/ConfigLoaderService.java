@@ -85,7 +85,7 @@ public class ConfigLoaderService {
      * <ul>
      *   <li>{@code TransferService.process} / {@code BatchDispatcher.dispatch}:主命令竞争成功后
      *       业务方已派发,后续路径配置消失时不应再阻断主流程</li>
-     *   <li>{@code DetailPollingService.writeSubCommandResult}:子命令执行期间配置被卸载
+     *   <li>{@code SChildCommandProcessor.writeSubCommandResult}:子命令执行期间配置被卸载
      *       也得能写一条结果表</li>
      *   <li>{@code ChildCommandMonitor.updateMainCommandStatus}:子节点监控完成时配置刚好被卸载
      *       也不阻塞 TOTAL_FLAG 流程</li>

@@ -28,7 +28,7 @@ import org.springframework.stereotype.Service;
  *
  * <p>
  * COORDINATED(S) 类型的 DOWNLOAD_MULTI_NODE 命令不由本类处理，
- * 而是由 TransferService 直接转给 DetailPollingService。
+ * 而是由 TransferService 直接转给 SChildCommandProcessor。
  */
 @Service
 public class TransferOrchestrator extends AbstractTransferOrchestrator {

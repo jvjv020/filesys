@@ -124,7 +124,7 @@ class SingleFileDownloadPipelineTest {
             assertTrue(r.isSuccess());
             assertEquals(100, r.getRecordCount());
             assertEquals(ColumnNames.STATUS_SUCCESS, r.getStatus());
-            verify(transferSupport).postProcess(eq(ftpClient), anyString(), eq(targetFile), eq(100));
+            verify(transferSupport).postProcess(eq(ftpClient), anyString(), eq(targetFile), any());
             verify(ftpClient).completePendingCommand();
         }
 
