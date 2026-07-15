@@ -100,28 +100,11 @@ public class TxtConverter implements FileConverter {
                 }
             }
             writer.flush();
-            log.info("Generated TXT with {} records", recordCount);
+            String table = mapping != null && mapping.getConfig() != null ? mapping.getConfig().getTableName() : null;
+            log.info("Generated TXT with {} records{}", recordCount, table != null ? " for table " + table : "");
             return recordCount;
         } catch (IOException e) {
             throw new RuntimeException("Failed to generate TXT", e);
-        }
-    }
-
-    @Override
-    public int countRecords(InputStream input, FieldMapping mapping) {
-        Map<String, String> cfg = ConverterUtils.mergeConfig(getDefaultConfig(), mapping);
-        Charset encoding = ConverterUtils.resolveCharset(cfg.getOrDefault("encoding", "UTF-8"));
-        int skipLines = ConverterUtils.parseInt(cfg.getOrDefault("skipLines", "0"), 0);
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(input, encoding))) {
-            reader.readLine();
-            for (int i = 1; i < skipLines; i++) reader.readLine();
-            int count = 0;
-            while (reader.readLine() != null) count++;
-            log.info("TXT countRecords: {} lines", count);
-            return count;
-        } catch (IOException e) {
-            log.warn("Failed to count TXT records: {}", e.getMessage());
-            return -1;
         }
     }
 

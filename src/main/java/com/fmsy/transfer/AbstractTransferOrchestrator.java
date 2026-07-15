@@ -49,7 +49,7 @@ public abstract class AbstractTransferOrchestrator {
         try {
             dispatch(command, config, result);
         } catch (Exception e) {
-            log.error("{} execution failed: {}", config.getScenario(), e.getMessage(), e);
+            log.error("{} execution failed for command {}: {}", config.getScenario(), command.getId(), e.getMessage(), e);
             result.failWith(e);
         } finally {
             finalize(command, config, result);

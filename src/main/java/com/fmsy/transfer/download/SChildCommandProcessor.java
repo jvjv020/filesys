@@ -6,12 +6,14 @@ import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.lifecycle.ShutdownService;
 import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
+import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.ResultRepository;
 import com.fmsy.transfer.BucketDistributor;
+import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TempTransferConfigFactory;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.transfer.download.BucketProcessor.BucketBatchResult;
@@ -56,6 +58,7 @@ public class SChildCommandProcessor {
     private final ResultRepository resultRepository;
     private final BucketProcessor bucketProcessor;
     private final ShutdownService shutdownService;
+    private final FieldMappingBuilder fieldMappingBuilder;
 
     /**
      * 轮询并处理 S 型子命令分配的桶（并行版本 + 外层竞争循环）
@@ -95,6 +98,9 @@ public class SChildCommandProcessor {
             // 基础文件路径模板(含占位符),供 BucketProcessor 每桶解析
             ResolvedPath baseFileInfo = ResolvedPath.of(sharedConfig.getFilePath());
 
+            // 预构建 FieldMapping 供所有桶共享（避免每桶重复查表元数据）
+            FieldMapping sharedMapping = fieldMappingBuilder.buildForDownload(sharedConfig);
+
             int iteration = 0;
             while (iteration < maxIterations) {
                 // 关闭检查:不开始新批次
@@ -129,6 +135,7 @@ public class SChildCommandProcessor {
                                 .contentionStrategy(
                                         (detail, nid) -> bucketDistributor.competeBucket(detail.getId(), nid) == 1)
                                 .pipelineCustomizer((pipelineOpts, bucket, fileInfo) -> {
+                                    pipelineOpts.setFieldMapping(sharedMapping);
                                     pipelineOpts.setExpectedAuditCount(bucket.getAuditCount());
                                 })
                                 .build(),

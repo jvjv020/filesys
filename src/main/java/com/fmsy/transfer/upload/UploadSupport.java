@@ -13,7 +13,6 @@ import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferSupport;
-import com.fmsy.util.BooleanUtils;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
 import com.fmsy.util.SystemConstants;
@@ -29,21 +28,27 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 上传场景 Support — 跨 3 个 Upload Handler 共享的上传协议方法。
+ * 上传场景 Support — 跨所有 Upload Handler 共享的上传协议纯方法集合。
  *
- * <p>4 个公共方法(resolveFilePath / preCheck / postProcess / handleEmptyData)已抽出到
- * {@link com.fmsy.transfer.TransferSupport},Handler 直接注入使用。
- * 本类只保留方向特有的:
+ * <p>
+ * 每个方法只做一件事，Handler 负责组合编排各阶段：<br>
+ * preCheck → truncateTable → insertDataAndVerify → postProcess
+ *
+ * <p>
+ * 纯方法列表：
  * <ul>
- *   <li>预审计:文件记录数 vs auditCount,使用 {@link FileConverter#countRecords} 按格式统计</li>
- *   <li>后审计:文件记录数 vs 插入记录数</li>
- *   <li>核心流式插入+后审计:{@link #insertAndVerifyPerFileInTx}</li>
- *   <li>完整单文件管线(含FTP借还+异常文件迁移):{@link #processSingleFile}</li>
- *   <li>跨场景状态判定:determineMainStatus + UploadResult 记录</li>
+ * <li>{@link #preCheck} — 前置标志文件检查</li>
+ * <li>{@link #truncateTable} — 清空目标表</li>
+ * <li>{@link #insertDataAndVerify} — 流式解析 + 批量插入 + 前后审计</li>
+ * <li>{@link #postProcess} — FTP 后操作</li>
+ * <li>{@link #moveDataAndFlagToErrorDir} — 异常文件迁移到 error 目录</li>
  * </ul>
  *
- * <p>所有上传场景统一走 {@link #insertAndVerifyPerFileInTx} 单事务插入(含后审计),
- * 清表与增量模式都适用,失败时全量回滚。</p>
+ * <p>
+ * 前稽核与后审计已合并到 {@link #insertAndVerifyPerFileInTx} 中，
+ * 在落库后使用 {@link CloseableIterator#getRecordCount()} 统一校验，
+ * 无需额外打开 FTP 文件流做独立前稽核。
+ * </p>
  */
 @Slf4j
 @Component
@@ -57,60 +62,150 @@ public class UploadSupport {
     private final ConverterFactory converterFactory;
     private final FieldMappingBuilder fieldMappingBuilder;
 
-    // ==================== 协议方法(方向特有) ====================
+    // ==================== 纯阶段方法(每个方法只做一件事) ====================
 
     /**
-     * 预审计:文件记录数 vs auditCount(Upload 语义)
+     * 前置标志文件检查。
      *
-     * <p>使用格式对应的 {@link FileConverter#countRecords} 统计文件记录数,
-     * 而非通用行数统计(CSV/TXT 逐行、DBF 从文件头读、XML 返回 -1)。
+     * <p>
+     * 委托给 {@link TransferSupport#preCheck}，处理三种结果：
+     * <ul>
+     * <li>返回 null — 检查通过，可以继续后续处理</li>
+     * <li>返回 {@link UploadResult}(SKIPPED) — 标志文件不存在，调用方应跳过该文件</li>
+     * <li>抛出 {@link FlagCheckException} — FLAG 比对失败，调用方应迁文件到 error 目录</li>
+     * </ul>
      *
-     * <p>当 auditCount 为 null/负数(表示不校验)时,跳过 FTP 文件流打开,
-     * 避免对无法统计记录数的格式(如 XML)做无谓的 I/O。
-     *
-     * @param auditCount 期望行数(null 或负数表示不校验)
-     * @param config     传输配置
-     * @param filePath   FTP 文件路径
-     * @param converter  文件格式转换器(用于按格式统计记录数)
-     * @return 0 表示通过或无需审计, -1 表示审计不通过或审计异常
+     * @param client   已借出的 FTP 客户端
+     * @param config   传输配置
+     * @param fileInfo 数据文件路径信息
+     * @param filePath 数据文件完整路径（仅用于日志）
+     * @return null=通过，非null=跳过结果
      */
-    public int preAudit(Integer auditCount, TransferConfig config, String filePath, FileConverter converter) {
-        // 未配置审计 → 无需打开文件流
-        if (auditCount == null || auditCount < 0) {
-            return 0;
-        }
+    public UploadResult preCheck(FtpClient client, TransferConfig config,
+            ResolvedPath fileInfo, String filePath) {
         try {
-            int recordCount = ftpPool.withClient(config.getFtpName(), client -> {
-                try (InputStream is = client.getInputStream(filePath)) {
-                    return converter.countRecords(is, null);
-                }
-            });
-            if (recordCount < 0) {
-                // 格式无法统计记录数(如 XML),跳过前稽核而非报错退出
-                log.warn("Pre-audit: unable to count records for {} format, skipping pre-audit", converter.getFormat());
-                return 0;
+            if (!transferSupport.preCheck(client, config, fileInfo)) {
+                String flagPath = resolveConfiguredFlagPath(config.getPreOperations(), fileInfo);
+                log.warn("Pre-check failed (flag not found), flag file: {}, data file: {}",
+                        flagPath != null ? flagPath : "unknown", filePath);
+                return new UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED);
             }
-            boolean passed = recordCount == auditCount;
-            log.info("Pre-audit file records: expected={}, actual={}, passed={}", auditCount, recordCount, passed);
-            if (!passed) {
-                log.error("Pre-audit failed: expected {} records, got {} for file {}", auditCount, recordCount, filePath);
-                return -1;
-            }
-            return 0;
+        } catch (FlagCheckException e) {
+            // FLAG 比对失败，上抛由调用方处理（迁文件到 error 目录）
+            throw e;
+        }
+        return null;
+    }
+
+    /**
+     * 清空目标表 — 在事务中执行 DELETE FROM。
+     *
+     * <p>
+     * 由 Handler 在落库前调用，确保插入数据时目标表是空的。
+     *
+     * @param config 传输配置
+     */
+    public void truncateTable(TransferConfig config) {
+        dbPool.getTransactionTemplate(config.getDbName()).execute(status -> {
+            targetTableRepository.truncate(config.getDbName(), config.getTableName());
+            return null;
+        });
+    }
+
+    /**
+     * 流式解析文件 → 批量插入 → 前后审计 — 单事务（使用预构建的 FieldMapping）。
+     *
+     * <p>
+     * 多文件场景（SERIAL）下，各文件共享同一个 config 和 null detailContext，
+     * 调用方可提前构建一次 FieldMapping 传入，避免重复查表元数据。
+     * </p>
+     *
+     * <p>
+     * 前稽核与后审计已合并到 {@link #insertAndVerifyPerFileInTx} 中，
+     * 在落库后使用 {@link CloseableIterator#getRecordCount()} 统一校验，
+     * 无需额外打开 FTP 文件流做独立前稽核。
+     * </p>
+     *
+     * @param client     已借出的 FTP 客户端
+     * @param config     传输配置
+     * @param mapping    预构建的字段映射（可为 null，为 null 时自动构建）
+     * @param filePath   FTP 文件路径
+     * @param auditCount 稽核数（可为 null，非 null 时在落库后校验）
+     * @return 成功插入的记录数
+     */
+    public int insertDataAndVerify(FtpClient client, TransferConfig config,
+            FieldMapping mapping, String filePath, Integer auditCount) {
+        FieldMapping effectiveMapping = mapping != null ? mapping
+                : fieldMappingBuilder.buildForUpload(config, null);
+        FileConverter converter = converterFactory.get(config.getParserType());
+
+        // 前稽核已合并到 insertAndVerifyPerFileInTx 中，在落库后与后审计同时进行
+        // 使用 CloseableIterator.getRecordCount() 统一获取文件实际记录数，无需额外 FTP 流
+        try (InputStream is = client.getInputStream(filePath);
+                CloseableIterator<List<Map<String, Object>>> dataIter = new CloseableIterator<>(
+                        converter.parse(is, effectiveMapping))) {
+            return insertAndVerifyPerFileInTx(config, dataIter, effectiveMapping, auditCount);
+        } catch (RuntimeException e) {
+            throw e;
         } catch (Exception e) {
-            log.error("Pre-audit failed for {}: {}", filePath, e.getMessage(), e);
-            return -1;
+            throw new RuntimeException("Insert failed for " + filePath + ": " + e.getMessage(), e);
         }
     }
 
     /**
-     * 后审计:本次插入记录数 vs 文件记录数(Upload 语义)
+     * 流式解析文件 → 批量插入 → 后审计 — 单事务（自动构建 FieldMapping）。
      *
-     * <p>比对的是"文件记录数"与"成功插入的记录数",而非全表 COUNT。
-     * 多文件场景下,全表 COUNT 包含其他文件的数据,对比无意义。
+     * <p>
+     * 自动根据 config 和 detailContext 构建 FieldMapping 后委托给
+     * {@link #insertDataAndVerify(FtpClient, TransferConfig, FieldMapping, String, Integer)}。
+     *
+     * @param client        已借出的 FTP 客户端
+     * @param config        传输配置
+     * @param fileInfo      数据文件路径信息（仅用于日志，已弃用）
+     * @param detailContext 明细上下文（可为 null，供 {FIELD_NAME} 占位符解析用）
+     * @param filePath      FTP 文件路径
+     * @param auditCount    稽核数（可为 null，用于落库后重新校验前稽核跳过的格式）
+     * @return 成功插入的记录数
+     */
+    public int insertDataAndVerify(FtpClient client, TransferConfig config,
+            ResolvedPath fileInfo, Map<String, Object> detailContext,
+            String filePath, Integer auditCount) {
+        FieldMapping mapping = fieldMappingBuilder.buildForUpload(config, detailContext);
+        return insertDataAndVerify(client, config, mapping, filePath, auditCount);
+    }
+
+    /**
+     * FTP 后操作 — 写入 SUB/FB/TOTAL 标志文件、删除文件、重命名等。
+     *
+     * <p>
+     * 失败时仅记录日志，不影响主状态（数据已落库）。
+     *
+     * @param client      已借出的 FTP 客户端
+     * @param config      传输配置
+     * @param fileInfo    数据文件路径信息（用于路径继承和内容变量解析）
+     * @param recordCount 成功插入的记录数（作为 {C} 变量传入后操作）
+     */
+    public void postProcess(FtpClient client, TransferConfig config,
+            ResolvedPath fileInfo, int recordCount) {
+        try {
+            transferSupport.postProcess(client, config, fileInfo, Map.of("C", String.valueOf(recordCount)));
+        } catch (Exception e) {
+            log.warn("Post-process failed for {}: {}", fileInfo != null ? fileInfo.fullPath() : "unknown",
+                    e.getMessage());
+        }
+    }
+
+    // ==================== 后审计 ====================
+
+    /**
+     * 后审计：本次插入记录数 vs 文件记录数（Upload 语义）。
+     *
+     * <p>
+     * 比对的是"文件记录数"与"成功插入的记录数"，而非全表 COUNT。
+     * 多文件场景下，全表 COUNT 包含其他文件的数据，对比无意义。
      *
      * @param config        传输配置
-     * @param fileLineCount 该文件的记录行数(由 preAudit 返回)
+     * @param fileLineCount 该文件的记录行数（由 CloseableIterator 迭代统计）
      * @param insertedCount 本次成功插入的记录数
      * @return true=审计通过
      */
@@ -121,33 +216,31 @@ public class UploadSupport {
         return passed;
     }
 
-    // ==================== 核心流式插入(单事务) ====================
+    // ==================== 核心流式插入（单事务） ====================
 
     /**
-     * 在事务中执行数据插入 — 提取自 3 个 insert* 方法的公共批量插入循环。
+     * 在事务中执行数据插入 — 批量插入循环。
      *
-     * <p>清表(truncateFirst)和空数据处理(handleEmptyData)在事务内完成,
-     * 失败时全部回滚,不影响其他文件。</p>
+     * <p>
+     * 空数据处理（handleEmptyData）在事务内完成，失败时全部回滚。
      *
      * @return 成功插入的记录数
      */
     private int executeInsertInTx(TransferConfig config, Iterator<List<Map<String, Object>>> dataIter,
-                                  FieldMapping mapping, List<String> fields, boolean truncateFirst) {
-        if (truncateFirst) {
-            targetTableRepository.truncate(config.getDbName(), config.getTableName());
-        }
+            FieldMapping mapping, List<String> fields) {
         int batchSize = SystemConstants.DEFAULT_BATCH_SIZE;
         List<Object[]> batch = new ArrayList<>();
         int totalRecords = 0;
 
         while (dataIter.hasNext()) {
             List<Map<String, Object>> batchChunk = dataIter.next();
-            if (batchChunk.isEmpty()) continue;
+            if (batchChunk.isEmpty())
+                continue;
 
             for (Map<String, Object> record : batchChunk) {
                 Object[] values = new Object[fields.size()];
                 for (int i = 0; i < fields.size(); i++) {
-                    values[i] = mapping.getValue(record, fields.get(i));  // uses outer mapping
+                    values[i] = mapping.getValue(record, fields.get(i));
                 }
                 batch.add(values);
 
@@ -166,7 +259,7 @@ public class UploadSupport {
             totalRecords += batch.size();
         }
 
-        // 空数据判断在事务内,ERROR/SKIP 模式直接回滚
+        // 空数据判断在事务内，ERROR/SKIP 模式直接回滚
         if (!transferSupport.handleEmptyData(totalRecords, config.getEmptyDataHandling())) {
             throw new RuntimeException("Empty data handling: " + config.getEmptyDataHandling());
         }
@@ -175,205 +268,99 @@ public class UploadSupport {
     }
 
     /**
-     * 在事务中执行插入 + 后审计 — 适用于多文件场景(目录通配符/明细表)的每个文件。
+     * 在事务中执行插入 + 前后审计 — 适用于多文件场景的每个文件。
      *
-     * <p>后审计失败时:
-     * <ul>
-     *   <li>ERROR 模式:抛出异常触发事务回滚,已插入数据全部撤销</li>
-     *   <li>非 ERROR 模式:数据已提交,返回 -1 供调用方标记该文件失败</li>
-     * </ul>
+     * <p>
+     * 前稽核与后审计在此处同时进行，均使用 {@link CloseableIterator#getRecordCount()}
+     * 获取的文件实际记录数，无需额外打开 FTP 流做独立前稽核。
+     * 后审计失败时始终回滚事务（数据完整性优先）。
+     * 清表操作已提取到调用方，由各 Handler 在开始落库前统一调用。
+     * </p>
      *
-     * @param config        传输配置
-     * @param dataIter      数据迭代器(需支持 {@link CloseableIterator#getRecordCount()})
-     * @param mapping       字段映射
-     * @param truncateFirst 是否先清表
-     * @return 成功插入的记录数, -1 表示后审计失败(非ERROR模式,数据已提交)
+     * @param config     传输配置
+     * @param dataIter   数据迭代器（需支持 {@link CloseableIterator#getRecordCount()}）
+     * @param mapping    字段映射
+     * @param auditCount 稽核数（可为 null；非 null 时在落库后校验）
+     * @return 成功插入的记录数
+     * @throws RuntimeException 审计失败时抛出，触发事务回滚
      */
     public int insertAndVerifyPerFileInTx(TransferConfig config,
-                                           CloseableIterator<List<Map<String, Object>>> dataIter,
-                                           FieldMapping mapping, boolean truncateFirst) {
+            CloseableIterator<List<Map<String, Object>>> dataIter,
+            FieldMapping mapping,
+            Integer auditCount) {
         String dbName = config.getDbName();
         TransactionTemplate tx = dbPool.getTransactionTemplate(dbName);
         List<String> fields = mapping.getTableFields();
 
         return tx.execute(status -> {
-            int totalRecords = executeInsertInTx(config, dataIter, mapping, fields, truncateFirst);
+            int totalRecords = executeInsertInTx(config, dataIter, mapping, fields);
 
-            // 后审计在事务内完成,ERROR 模式可回滚未提交的数据
+            // 前稽核：与后审计同时进行，使用同一个 dataIter.getRecordCount()，无需额外 FTP 流
             int fileRecordCount = dataIter.getRecordCount();
-            if (!postAudit(config, fileRecordCount, totalRecords)) {
-                if (config.getEmptyDataHandling() == EmptyDataHandling.ERROR) {
-                    throw new RuntimeException("Post-audit failed: file records=" + fileRecordCount
-                            + ", inserted=" + totalRecords + " for " + config.getTableName());
-                }
-                log.warn("Post-audit failed (non-ERROR mode): file records={}, inserted={}, data kept",
-                        fileRecordCount, totalRecords);
-                return -1;
+            if (auditCount != null && auditCount >= 0 && fileRecordCount != auditCount) {
+                throw new RuntimeException("Pre-audit failed: expected " + auditCount
+                        + " records, got " + fileRecordCount + " for " + config.getTableName());
             }
-
+            if (auditCount != null && auditCount >= 0) {
+                log.debug("Pre-audit passed: {} records match expected {}", fileRecordCount, auditCount);
+            }
+            // 后审计：插入记录数 vs 文件记录数，不匹配则回滚（数据完整性优先）
+            if (!postAudit(config, fileRecordCount, totalRecords)) {
+                throw new RuntimeException("Post-audit failed: file records=" + fileRecordCount
+                        + ", inserted=" + totalRecords + " for " + config.getTableName());
+            }
             log.debug("Inserted {} records in single transaction (with verify)", totalRecords);
             return totalRecords;
         });
     }
 
-    /**
-     * 清表操作 — 在事务中清空目标表。
-     *
-     * <p>由 SingleUploadHandler / MultiDirectoryUploadHandler / MultiBatchUploadHandler
-     * 在 clearTableFlag=Y 时调用，避免各 Handler 直接依赖 TargetTableRepository 和 DbPool。
-     */
-    public void truncateTable(TransferConfig config) {
-        dbPool.getTransactionTemplate(config.getDbName()).execute(status -> {
-            targetTableRepository.truncate(config.getDbName(), config.getTableName());
-            return null;
-        });
-    }
+    // ==================== 异常文件迁移 ====================
 
     /**
-     * 单文件完整上传流程 — 前置检查 → 前稽核 → 插入 → 后稽核 → 后操作。
+     * 将数据文件及配置的标志文件一起迁到 error 目录。
      *
-     * <p>异常由调用方处理:
-     * <ul>
-     *   <li>{@link FlagCheckException} (preCheck FLAG比对失败) → 调用方负责迁数据文件+标志文件到error目录</li>
-     *   <li>其他运行时异常(preAudit/insert/postAudit/postProcess失败) → 调用方负责迁文件+标记ERROR</li>
-     *   <li>preCheck返回false(标志文件不存在) → 返回UploadResult.SKIPPED，调用方仅告警跳过，不迁移文件</li>
-     * </ul>
-     *
-     * @param client          已借出的FTP客户端（由调用方管理close）
-     * @param command         指令对象（取auditCount等）
-     * @param config          传输配置
-     * @param filePath        数据文件FTP路径
-     * @param detailContext   明细上下文（可为null，供{FIELD_NAME}占位符解析用）
-     * @return 单文件UploadResult，status=null表示成功，SKIPPED表示跳过，ERROR表示失败
+     * <p>
+     * 数据文件迁移委托给 {@link FtpClient#moveToErrorDir}（含时间戳重命名及通用标志文件后缀的迁移）。
+     * 同时根据 preOperations 中的 FLAG/READY 路径，将配置的标志文件也迁到 error 目录。
      */
-    public UploadResult uploadSingleFile(FtpClient client, Integer auditCount, TransferConfig config,
-                                          String filePath, Map<String, Object> detailContext) {
-        ResolvedPath fileInfo = ResolvedPath.of(filePath);
-
-        // Phase 1: preCheck — 标志文件不存在返回跳过，比对失败抛 FlagCheckException
-        UploadResult preCheckResult = phase1PreCheck(client, config, fileInfo, filePath);
-        if (preCheckResult != null) return preCheckResult;
-
-        // Phase 2a: preAudit — 文件记录数 vs 稽核数
-        FileConverter converter = converterFactory.get(config.getParserType());
-        int preAuditResult = preAudit(auditCount, config, filePath, converter);
-        if (preAuditResult < 0) {
-            throw new RuntimeException("Pre-audit failed for: " + filePath);
-        }
-
-        // Phase 2b: 流式解析 + 批量插入 + 后审计
-        return phase2bInsertAndVerify(client, config, fileInfo, detailContext, converter, filePath);
-    }
-
-    /** Phase 1: 前置文件检查 — null=通过，非null=跳过结果。 */
-    private UploadResult phase1PreCheck(FtpClient client, TransferConfig config,
-                                        ResolvedPath fileInfo, String filePath) {
+    public void moveDataAndFlagToErrorDir(FtpClient client, String filePath, TransferConfig config) {
+        // 1. 迁数据文件（FtpClient 本身已处理 .OK/.ready/.flag 等通用后缀）
         try {
-            if (!transferSupport.preCheck(client, config, fileInfo)) {
-                log.warn("Pre-check failed (flag not found) for: {}", filePath);
-                return new UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED);
-            }
-        } catch (FlagCheckException e) {
-            // FLAG 比对失败 → 上抛，由调用方负责迁文件到 error 目录
-            throw e;
-        }
-        return null;
-    }
-
-    /** Phase 2b: 构建映射 → 流式解析 → 插入+后审计 → 后操作。 */
-    private UploadResult phase2bInsertAndVerify(FtpClient client, TransferConfig config,
-                                                ResolvedPath fileInfo,
-                                                Map<String, Object> detailContext,
-                                                FileConverter converter, String filePath) {
-        FieldMapping mapping = fieldMappingBuilder.buildForUpload(config, detailContext);
-        try (InputStream is = client.getInputStream(filePath);
-             CloseableIterator<List<Map<String, Object>>> dataIter =
-                     new CloseableIterator<>(converter.parse(is, mapping))) {
-
-            boolean truncateFirst = BooleanUtils.isYes(config.getClearTableFlag());
-            int count = insertAndVerifyPerFileInTx(config, dataIter, mapping, truncateFirst);
-            if (count < 0) {
-                throw new RuntimeException("Post-audit failed for: " + filePath);
-            }
-
-            // Phase 3: postProcess（失败不影响结果状态，仅记录）
-            try {
-                transferSupport.postProcess(client, config, fileInfo, Map.of("C", String.valueOf(count)));
-            } catch (Exception e) {
-                log.warn("Post-process failed for {}: {}", filePath, e.getMessage());
-            }
-
-            return new UploadResult(count, 1, 0, 0, null);
-        } catch (RuntimeException e) {
-            throw e;
+            client.moveToErrorDir(filePath);
         } catch (Exception e) {
-            throw new RuntimeException("Upload failed for " + filePath + ": " + e.getMessage(), e);
+            log.error("Failed to move error file {}: {}", filePath, e.getMessage());
         }
-    }
-
-    // ==================== 单文件处理复用方法 ====================
-
-    /**
-     * 处理单个文件上传的完整流程 — 包括 FTP 客户端借还、上传管线、错误处理（文件迁移）。
-     *
-     * <p>本方法封装了以下步骤:
-     * <ol>
-     *   <li>通过 {@link TransferSupport#executeWithClient} 借还 FTP 客户端</li>
-     *   <li>调用 {@link #uploadSingleFile} 执行上传管线(preCheck→preAudit→insert→postAudit→postProcess)</li>
-     *   <li>异常处理:FLAG 比对失败/preAudit失败/后审计失败时,自动将数据文件及配置的标志文件迁到 error 目录</li>
-     * </ol>
-     *
-     * <p>调用方无需再处理 FTP 借还和文件迁移,只需根据返回的 {@link UploadResult} 进行业务处理
-     * （如更新明细表状态、设置结果表状态等）。
-     *
-     * <p>本方法不抛出异常 — 所有错误都编码到 {@link UploadResult#status()} 中。
-     *
-     * @param ftpName       FTP 连接名
-     * @param auditCount    稽核数（可为 null）
-     * @param config        传输配置
-     * @param filePath      数据文件 FTP 路径
-     * @param detailContext 明细上下文（可为 null,供 {FIELD_NAME} 占位符解析用）
-     * @return 上传结果,status=null 表示成功,SKIPPED 表示跳过,ERROR 表示失败
-     */
-    public UploadResult processSingleFile(String ftpName, Integer auditCount, TransferConfig config,
-                                          String filePath, Map<String, Object> detailContext) {
+        // 2. 迁配置的标志文件（从 preOperations 中解析 FLAG/READY 路径）
+        String flagPath = null;
         try {
-            return transferSupport.executeWithClient(ftpName, client -> {
-                try {
-                    UploadResult r = uploadSingleFile(client, auditCount, config, filePath, detailContext);
-                    // SKIPPED 和 null 均直接返回(异常在 uploadSingleFile 中以抛异常表达)
-                    return r;
-                } catch (FlagCheckException e) {
-                    // FLAG 比对失败 → 迁数据文件+标志文件
-                    moveDataAndFlagToErrorDir(client, filePath, config);
-                    log.warn("FLAG check failed for {}: {}", filePath, e.getMessage());
-                    return new UploadResult(0, 0, 0, 1, ColumnNames.STATUS_ERROR);
-                } catch (RuntimeException e) {
-                    // preAudit 失败/后审计失败 → 迁数据文件+标志文件
-                    moveDataAndFlagToErrorDir(client, filePath, config);
-                    log.error("Upload failed for {}: {}", filePath, e.getMessage());
-                    return new UploadResult(0, 0, 0, 1, ColumnNames.STATUS_ERROR);
+            flagPath = resolveConfiguredFlagPath(config.getPreOperations(), ResolvedPath.of(filePath));
+            if (flagPath != null && !flagPath.isEmpty() && !flagPath.equals(filePath)) {
+                if (client.exists(flagPath)) {
+                    client.moveToErrorDir(flagPath);
                 }
-            });
+            }
         } catch (Exception e) {
-            // executeWithClient 自身抛出的异常（极少的连接层异常）
-            log.error("Unexpected error uploading {}: {}", filePath, e.getMessage(), e);
-            return new UploadResult(0, 0, 0, 1, ColumnNames.STATUS_ERROR);
+            log.warn("Failed to move configured flag file {} for data file {}: {}",
+                    flagPath != null ? flagPath : "unknown", filePath, e.getMessage());
         }
     }
+
+    // ==================== 标志文件路径解析工具 ====================
 
     /**
      * 从传输配置的前置操作中提取标志文件的路径。
      *
-     * <p>解析 preOperations 字符串,找到第一个 FLAG 或 READY 操作,提取路径模式
-     * 并解析文件衍生变量({@code {stem}}, {@code {name}}, {@code {ext}}, {@code {dir}} 等)。
+     * <p>
+     * 解析 preOperations 字符串，找到第一个 FLAG 或 READY 操作，提取路径模式
+     * 并解析文件衍生变量（{stem}, {name}, {ext}, {dir} 等）。
      *
-     * @param preOps  前置操作字符串,如 {@code "FLAG:{stem}.OK"} 或 {@code "READY:{stem}.ready"}
-     * @param fileInfo 数据文件的路径信息,用于解析文件衍生变量
+     * @param preOps   前置操作字符串，如 "FLAG:{stem}.OK" 或 "READY:{stem}.ready"
+     * @param fileInfo 数据文件的路径信息，用于解析文件衍生变量
      * @return 解析后的标志文件完整路径；没有 FLAG/READY 操作时返回 null
      */
     public static String resolveConfiguredFlagPath(String preOps, ResolvedPath fileInfo) {
-        if (preOps == null || preOps.isEmpty() || fileInfo == null) return null;
+        if (preOps == null || preOps.isEmpty() || fileInfo == null)
+            return null;
         for (String op : preOps.split(",")) {
             op = op.trim();
             String pathPart;
@@ -384,7 +371,8 @@ public class UploadSupport {
             } else {
                 continue;
             }
-            if (pathPart.isEmpty()) continue;
+            if (pathPart.isEmpty())
+                continue;
 
             // 去掉模式后缀（;mode 部分）
             int semicolon = pathPart.indexOf(';');
@@ -415,12 +403,14 @@ public class UploadSupport {
      * 规范化路径中的 ".." 段。
      */
     static String normalizePathSlashes(String path) {
-        if (path == null || !path.contains("..")) return path;
+        if (path == null || !path.contains(".."))
+            return path;
         String[] segments = path.split("/");
         ArrayList<String> result = new ArrayList<>();
         for (String seg : segments) {
             if ("..".equals(seg)) {
-                if (!result.isEmpty()) result.remove(result.size() - 1);
+                if (!result.isEmpty())
+                    result.remove(result.size() - 1);
             } else if (!seg.isEmpty()) {
                 result.add(seg);
             }
@@ -428,46 +418,22 @@ public class UploadSupport {
         return "/" + String.join("/", result);
     }
 
-    /**
-     * 将数据文件及配置的标志文件一起迁到 error 目录。
-     *
-     * <p>数据文件迁移委托给 {@link FtpClient#moveToErrorDir}（含时间戳重命名及通用标志文件后缀的迁移）。
-     * 同时根据 preOperations 中的 FLAG/READY 路径,将配置的标志文件也迁到 error 目录。
-     */
-    private void moveDataAndFlagToErrorDir(FtpClient client, String filePath, TransferConfig config) {
-        // 1. 迁数据文件（FtpClient 本身已处理 .OK/.ready/.flag 等通用后缀）
-        try {
-            client.moveToErrorDir(filePath);
-        } catch (Exception e) {
-            log.error("Failed to move error file {}: {}", filePath, e.getMessage());
-        }
-        // 2. 迁配置的标志文件（从 preOperations 中解析 FLAG/READY 路径）
-        try {
-            String flagPath = resolveConfiguredFlagPath(config.getPreOperations(), ResolvedPath.of(filePath));
-            if (flagPath != null && !flagPath.isEmpty() && !flagPath.equals(filePath)) {
-                if (client.exists(flagPath)) {
-                    client.moveToErrorDir(flagPath);
-                }
-            }
-        } catch (Exception e) {
-            log.warn("Failed to move configured flag file for {}: {}", filePath, e.getMessage());
-        }
-    }
-
     // ==================== 跨场景主状态判定 ====================
 
     /**
      * 单文件上传结果。
-     * @param records     成功插入的记录数（跳过或失败时为0）
+     *
+     * @param records      成功插入的记录数（跳过或失败时为0）
      * @param successCount 成功文件数
      * @param skippedCount 跳过文件数
      * @param failedCount  失败文件数
-     * @param status      null=成功, SKIPPED=跳过, ERROR=失败
+     * @param status       null=成功，SKIPPED=跳过，ERROR=失败
      */
     public record UploadResult(int records, int successCount, int skippedCount, int failedCount,
-                               String status) {
-        public static UploadResult allSkipped() { return new UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED); }
+            String status) {
+        public static UploadResult allSkipped() {
+            return new UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED);
+        }
     }
-
 
 }

@@ -48,7 +48,7 @@ public class AuditService {
                 case DOWNLOAD -> preAuditDbRecords(source, auditCount, dbName);
             };
         } catch (Exception e) {
-            log.error("Pre-audit failed: {}", e.getMessage(), e);
+            log.error("Pre-audit failed for source={} (db={}): {}", source, dbName, e.getMessage(), e);
             return -1;
         }
     }
@@ -82,7 +82,7 @@ public class AuditService {
                     splitField, fieldValue, auditCount, count, passed);
             return passed ? count : -1;
         } catch (Exception e) {
-            log.error("Pre-audit by bucket failed: {}", e.getMessage(), e);
+            log.error("Pre-audit by bucket failed for table {} (db={}): {}", tableName, dbName, e.getMessage(), e);
             return -1;
         }
     }
@@ -122,7 +122,7 @@ public class AuditService {
                 case DOWNLOAD -> postAuditDownload(ftpName, source, target, knownDbCount, dbName);
             };
         } catch (Exception e) {
-            log.error("Post-audit failed: {}", e.getMessage(), e);
+            log.error("Post-audit failed for source={}, target={} (db={}): {}", source, target, dbName, e.getMessage(), e);
             return false;
         }
     }

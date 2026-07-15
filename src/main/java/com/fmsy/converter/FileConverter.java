@@ -90,21 +90,4 @@ public interface FileConverter {
         // 默认无操作 — 仅 XML/DBF 需要实现
     }
 
-    /**
-     * 统计输入流中的记录行数。
-     *
-     * <p>各格式实现方式:
-     * <ul>
-     *   <li>CSV/TXT: 逐行读取,跳过表头行,统计数据行数</li>
-     *   <li>DBF: 从文件头偏移 4-7 字节读取 LE int32 记录数(无需遍历全文件)</li>
-     *   <li>XML: 返回 -1(需要完整解析才能准确统计,代价过高)</li>
-     * </ul>
-     *
-     * @param input   输入流(调用方负责关闭)
-     * @param mapping 字段映射(包含 parserConfig 配置)
-     * @return 记录行数;难以计算时返回 -1
-     */
-    default int countRecords(InputStream input, FieldMapping mapping) {
-        return -1;
     }
-}

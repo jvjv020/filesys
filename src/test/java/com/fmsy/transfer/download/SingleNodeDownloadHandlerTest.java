@@ -6,6 +6,7 @@ import com.fmsy.model.Detail;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.transfer.BucketDistributor;
+import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.transfer.download.BucketProcessor.BucketBatchResult;
@@ -46,6 +47,9 @@ class SingleNodeDownloadHandlerTest {
     @Mock
     private DownloadSupport downloadSupport;
 
+    @Mock
+    private FieldMappingBuilder fieldMappingBuilder;
+
     private SingleNodeDownloadHandler handler;
 
     private Command command;
@@ -56,7 +60,7 @@ class SingleNodeDownloadHandlerTest {
     @BeforeEach
     void setUp() {
         handler = new SingleNodeDownloadHandler(bucketProcessor, bucketDistributor,
-                transferSupport, downloadSupport);
+                transferSupport, downloadSupport, fieldMappingBuilder);
 
         command = new Command();
         command.setId(1L);

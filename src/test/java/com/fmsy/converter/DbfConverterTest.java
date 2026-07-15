@@ -202,40 +202,4 @@ class DbfConverterTest {
         }
     }
 
-    @Nested
-    @DisplayName("countRecords")
-    class CountRecordsTests {
-
-        @Test
-        @DisplayName("should return record count from DBF header")
-        void shouldReturnRecordCountFromHeader() throws IOException {
-            ByteArrayOutputStream output = new ByteArrayOutputStream();
-
-            Map<String, Object> record = new LinkedHashMap<>();
-            record.put("NAME", "Test");
-            record.put("AGE", 20L);
-            record.put("BIRTHDAY", LocalDate.of(2000, 1, 1));
-            record.put("ACTIVE", true);
-
-            List<List<Map<String, Object>>> data = new ArrayList<>();
-            data.add(Arrays.asList(record, record));
-
-            converter.generate(output, data.iterator(), mapping);
-            byte[] dbfBytes = output.toByteArray();
-
-            ByteArrayInputStream input = new ByteArrayInputStream(dbfBytes);
-            int count = converter.countRecords(input, mapping);
-
-            // generate writes header before knowing actual record count, so header count is 0
-            assertEquals(0, count);
-        }
-
-        @Test
-        @DisplayName("should return -1 for empty input")
-        void shouldReturnMinusOneForEmptyInput() {
-            ByteArrayInputStream input = new ByteArrayInputStream(new byte[0]);
-            int count = converter.countRecords(input, mapping);
-            assertEquals(-1, count);
-        }
     }
-}

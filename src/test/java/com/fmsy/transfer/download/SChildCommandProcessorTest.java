@@ -13,6 +13,7 @@ import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.ResultRepository;
 import com.fmsy.transfer.BucketDistributor;
+import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TempTransferConfigFactory;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.transfer.download.BucketProcessor.BucketBatchResult;
@@ -78,6 +79,9 @@ class SChildCommandProcessorTest {
     @Mock
     private ShutdownService shutdownService;
 
+    @Mock
+    private FieldMappingBuilder fieldMappingBuilder;
+
     private SChildCommandProcessor processor;
 
     @BeforeEach
@@ -92,7 +96,7 @@ class SChildCommandProcessorTest {
                 detailRepository, bucketDistributor,
                 configLoader, commandRepository, tempConfigFactory,
                 appConfig, transferSupport, resultRepository,
-                bucketProcessor, shutdownService);
+                bucketProcessor, shutdownService, fieldMappingBuilder);
     }
 
     private Command createSubCommand(Long id, String category, String control, CommandType type, String extraInfo) {

@@ -170,7 +170,8 @@ public class XmlConverter implements FileConverter {
                 }
             }
             writer.flush();
-            log.info("Generated XML with {} records", recordCount);
+            String table = mapping != null && mapping.getConfig() != null ? mapping.getConfig().getTableName() : null;
+            log.info("Generated XML with {} records{}", recordCount, table != null ? " for table " + table : "");
         } catch (XMLStreamException e) {
             throw new RuntimeException("Failed to write XML records", e);
         }
@@ -230,7 +231,8 @@ public class XmlConverter implements FileConverter {
             writer.writeEndElement();
             writer.writeEndDocument();
             writer.flush();
-            log.info("Generated XML with {} records", recordCount);
+            String table = mapping != null && mapping.getConfig() != null ? mapping.getConfig().getTableName() : null;
+            log.info("Generated XML with {} records{}", recordCount, table != null ? " for table " + table : "");
         } catch (XMLStreamException e) {
             throw new RuntimeException("Failed to generate XML", e);
         } finally {

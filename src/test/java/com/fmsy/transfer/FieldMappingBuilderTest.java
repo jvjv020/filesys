@@ -150,6 +150,121 @@ class FieldMappingBuilderTest {
     }
 
     @Nested
+    @DisplayName("buildForUploadBase")
+    class BuildForUploadBaseTests {
+
+        @Test
+        @DisplayName("should return empty mapping when config is null")
+        void shouldReturnEmptyMappingWhenConfigIsNull() {
+            FieldMapping result = fieldMappingBuilder.buildForUploadBase(null);
+
+            assertNotNull(result);
+            assertNull(result.getConfig());
+            assertNull(result.getTableFields());
+            assertNull(result.getExtraFields());
+        }
+
+        @Test
+        @DisplayName("should build base mapping without extra fields")
+        void shouldBuildBaseMappingWithoutExtraFields() {
+            TransferConfig config = new TransferConfig();
+            config.setDbName("DB_DEFAULT");
+            config.setTableName("test_table");
+            config.setParserType("CSV");
+
+            when(tableMetadataService.getTableColumns("DB_DEFAULT", "test_table"))
+                    .thenReturn(List.of("COL1", "COL2"));
+            when(converterFactory.get("CSV")).thenReturn(fileConverter);
+            when(fileConverter.getDefaultConfig()).thenReturn(Map.of());
+
+            FieldMapping result = fieldMappingBuilder.buildForUploadBase(config);
+
+            assertEquals(2, result.getTableFields().size());
+            assertTrue(result.getTableFields().contains("COL1"));
+            assertTrue(result.getTableFields().contains("COL2"));
+            assertNull(result.getExtraFields());
+        }
+    }
+
+    @Nested
+    @DisplayName("attachExtraFields")
+    class AttachExtraFieldsTests {
+
+        @Test
+        @DisplayName("should return base when detail is null")
+        void shouldReturnBaseWhenDetailIsNull() {
+            TransferConfig config = new TransferConfig();
+            config.setDbName("DB_DEFAULT");
+            config.setTableName("test_table");
+            config.setParserType("CSV");
+
+            when(tableMetadataService.getTableColumns("DB_DEFAULT", "test_table"))
+                    .thenReturn(List.of("COL1"));
+            when(converterFactory.get("CSV")).thenReturn(fileConverter);
+            when(fileConverter.getDefaultConfig()).thenReturn(Map.of());
+
+            FieldMapping base = fieldMappingBuilder.buildForUploadBase(config);
+            FieldMapping result = fieldMappingBuilder.attachExtraFields(base, null);
+
+            // 应返回同一个 base 对象（不创建新对象）
+            assertSame(base, result);
+            assertNull(result.getExtraFields());
+        }
+
+        @Test
+        @DisplayName("should return base when detail has no field name/value")
+        void shouldReturnBaseWhenDetailHasNoExtras() {
+            TransferConfig config = new TransferConfig();
+            config.setDbName("DB_DEFAULT");
+            config.setTableName("test_table");
+            config.setParserType("CSV");
+
+            when(tableMetadataService.getTableColumns("DB_DEFAULT", "test_table"))
+                    .thenReturn(List.of("COL1"));
+            when(converterFactory.get("CSV")).thenReturn(fileConverter);
+            when(fileConverter.getDefaultConfig()).thenReturn(Map.of());
+
+            FieldMapping base = fieldMappingBuilder.buildForUploadBase(config);
+            FieldMapping result = fieldMappingBuilder.attachExtraFields(base, Map.of());
+
+            // 无 extras → 返回 base 本身
+            assertSame(base, result);
+        }
+
+        @Test
+        @DisplayName("should create new mapping with extras attached")
+        void shouldCreateNewMappingWithExtrasAttached() {
+            TransferConfig config = new TransferConfig();
+            config.setDbName("DB_DEFAULT");
+            config.setTableName("test_table");
+            config.setParserType("CSV");
+
+            when(tableMetadataService.getTableColumns("DB_DEFAULT", "test_table"))
+                    .thenReturn(List.of("COL1", "COL2"));
+            when(converterFactory.get("CSV")).thenReturn(fileConverter);
+            when(fileConverter.getDefaultConfig()).thenReturn(Map.of());
+
+            FieldMapping base = fieldMappingBuilder.buildForUploadBase(config);
+
+            Map<String, Object> detail = new HashMap<>();
+            detail.put(ColumnNames.FIELD_NAME, "REGION,STATUS");
+            detail.put(ColumnNames.FIELD_VALUE, "EAST,ACTIVE");
+
+            FieldMapping result = fieldMappingBuilder.attachExtraFields(base, detail);
+
+            // 返回新对象，不修改 base
+            assertNotSame(base, result);
+            assertEquals(base.getTableFields(), result.getTableFields());
+            assertNotNull(result.getExtraFields());
+            assertEquals("EAST", result.getExtraFields().get("REGION"));
+            assertEquals("ACTIVE", result.getExtraFields().get("STATUS"));
+
+            // 原 base 不应受影响
+            assertNull(base.getExtraFields());
+        }
+    }
+
+    @Nested
     @DisplayName("buildForDownload")
     class BuildForDownloadTests {
 

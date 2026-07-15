@@ -1,6 +1,9 @@
 package com.fmsy.transfer.upload;
 
+import com.fmsy.converter.ConverterFactory;
+import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.EmptyDataHandling;
+import com.fmsy.exception.FlagCheckException;
 import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
@@ -22,11 +25,11 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 /**
- * SingleUploadHandler 重构后测试 — 使用 processSingleFile 统一处理。
+ * SingleUploadHandler 重构后测试 — 使用纯方法组合。
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-@DisplayName("SingleUploadHandler Tests (using processSingleFile)")
+@DisplayName("SingleUploadHandler Tests")
 class SingleUploadHandlerTest {
 
     @Mock
@@ -34,6 +37,12 @@ class SingleUploadHandlerTest {
 
     @Mock
     private TransferSupport transferSupport;
+
+    @Mock
+    private ConverterFactory converterFactory;
+
+    @Mock
+    private FileConverter fileConverter;
 
     private SingleUploadHandler handler;
 
@@ -43,7 +52,7 @@ class SingleUploadHandlerTest {
     private ResolvedPath fileInfo;
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws Exception {
         handler = new SingleUploadHandler(uploadSupport, transferSupport);
 
         command = new Command();
@@ -63,43 +72,26 @@ class SingleUploadHandlerTest {
         fileInfo = ResolvedPath.of("/data/20260615/file.csv");
     }
 
-    // ==================== preCheck 失败 ====================
+    // ==================== preCheck 返回 SKIPPED ====================
 
     @Nested
-    @DisplayName("handle - preCheck 返回 false（标志文件不存在）")
+    @DisplayName("handle - preCheck 返回 SKIPPED（标志文件不存在）")
     class HandlePreCheckReturnsFalse {
 
         @Test
         @DisplayName("应设置 SKIPPED 状态")
         void shouldSetSkippedWhenPreCheckReturnsFalse() throws Exception {
             when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-            when(uploadSupport.processSingleFile(anyString(), any(), any(), anyString(), any()))
+            doAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(mock(com.fmsy.ftp.FtpClient.class));
+                    }).when(transferSupport).executeWithClient(eq("ftp1"), any());
+            when(uploadSupport.preCheck(any(), any(), any(), anyString()))
                     .thenReturn(new UploadSupport.UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED));
 
             handler.handle(command, config, result);
 
             assertEquals(ColumnNames.STATUS_SKIPPED, result.getResult());
-            assertEquals(0, result.getRecordCount());
-        }
-    }
-
-    // ==================== 失败流程（processSingleFile 返回 ERROR） ====================
-
-    @Nested
-    @DisplayName("handle - processSingleFile 返回 ERROR")
-    class HandleProcessSingleFileError {
-
-        @Test
-        @DisplayName("应设置 ERROR 状态，不抛异常")
-        void shouldSetErrorWithoutThrowing() {
-            when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-            when(uploadSupport.processSingleFile(anyString(), any(), any(), anyString(), any()))
-                    .thenReturn(new UploadSupport.UploadResult(0, 0, 0, 1, ColumnNames.STATUS_ERROR));
-
-            // processSingleFile 不抛异常，内部已处理文件迁移
-            assertDoesNotThrow(() -> handler.handle(command, config, result));
-
-            assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
             assertEquals(0, result.getRecordCount());
         }
     }
@@ -111,10 +103,14 @@ class SingleUploadHandlerTest {
     class HandleSuccessFlow {
 
         @BeforeEach
-        void setup() {
+        void setup() throws Exception {
             when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-            when(uploadSupport.processSingleFile(anyString(), any(), any(), anyString(), any()))
-                    .thenReturn(new UploadSupport.UploadResult(100, 1, 0, 0, null));
+            doAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(mock(com.fmsy.ftp.FtpClient.class));
+                    }).when(transferSupport).executeWithClient(eq("ftp1"), any());
+            when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
+            when(uploadSupport.insertDataAndVerify(any(), any(), any(ResolvedPath.class), any(), anyString(), any())).thenReturn(100);
         }
 
         @Test
@@ -125,45 +121,61 @@ class SingleUploadHandlerTest {
             assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
             assertEquals(100, result.getRecordCount());
         }
-    }
-
-    // ==================== Phase3 postProcess 失败 ====================
-
-    @Nested
-    @DisplayName("handle - Phase3 postProcess 失败")
-    class HandlePhase3Failure {
 
         @Test
-        @DisplayName("processSingleFile 内部处理 postProcess 异常，返回成功结果")
-        void shouldSetSuccessWhenPostProcessFails() throws Exception {
-            when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-            // uploadSingleFile 内部吞掉 postProcess 异常，processSingleFile 返回成功
-            when(uploadSupport.processSingleFile(anyString(), any(), any(), anyString(), any()))
-                    .thenReturn(new UploadSupport.UploadResult(100, 1, 0, 0, null));
+        @DisplayName("清表标志为 Y 时在 preCheck 后、落库前调用 truncateTable")
+        void shouldTruncateAfterPreCheckBeforeInsert() throws Exception {
+            config.setClearTableFlag("Y");
 
             handler.handle(command, config, result);
 
-            assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
-            assertEquals(100, result.getRecordCount());
+            // 验证执行顺序：preCheck → truncate → insert（前稽核已合并到 insertDataAndVerify 中）
+            verify(uploadSupport).preCheck(any(), any(), any(), anyString());
+            verify(uploadSupport).truncateTable(config);
+            verify(uploadSupport).insertDataAndVerify(any(), any(), any(ResolvedPath.class), any(), anyString(), any());
+            verify(uploadSupport).postProcess(any(), any(), any(ResolvedPath.class), eq(100));
         }
     }
 
-    // ==================== processSingleFile 不再抛出 FlagCheckException ====================
+    // ==================== 异常流程 ====================
 
     @Nested
-    @DisplayName("handle - processSingleFile 将异常转为 ERROR")
-    class HandleFlagCheckExceptionInsideProcessSingleFile {
+    @DisplayName("handle - 异常流程")
+    class HandleExceptionFlow {
+
+        @BeforeEach
+        void setup() {
+            when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
+        }
 
         @Test
-        @DisplayName("FlagCheckException 被 processSingleFile 内部处理，不传播")
-        void shouldNotPropagateFlagCheckException() {
-            when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-            // processSingleFile 内部捕获异常，返回 ERROR 结果
-            when(uploadSupport.processSingleFile(anyString(), any(), any(), anyString(), any()))
-                    .thenReturn(new UploadSupport.UploadResult(0, 0, 0, 1, ColumnNames.STATUS_ERROR));
+        @DisplayName("insertDataAndVerify 失败应设置 ERROR 并迁文件")
+        @SuppressWarnings("unchecked")
+        void shouldSetErrorOnInsertFailure() throws Exception {
+            doAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(mock(com.fmsy.ftp.FtpClient.class));
+                    }).when(transferSupport).executeWithClient(eq("ftp1"), any());
+            when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
+            when(uploadSupport.insertDataAndVerify(any(), any(), any(ResolvedPath.class), any(), anyString(), any()))
+                    .thenThrow(new RuntimeException("Pre-audit failed: expected 100, got 50"));
 
-            // 不再抛出 FlagCheckException
-            assertDoesNotThrow(() -> handler.handle(command, config, result));
+            handler.handle(command, config, result);
+
+            assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
+        }
+
+        @Test
+        @DisplayName("FlagCheckException 应设置 ERROR 并迁文件")
+        void shouldSetErrorOnFlagCheckException() throws Exception {
+            doAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(mock(com.fmsy.ftp.FtpClient.class));
+                    }).when(transferSupport).executeWithClient(eq("ftp1"), any());
+            when(uploadSupport.preCheck(any(), any(), any(), anyString()))
+                    .thenThrow(new FlagCheckException("FLAG mismatch"));
+
+            handler.handle(command, config, result);
 
             assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
         }
@@ -179,10 +191,14 @@ class SingleUploadHandlerTest {
         @DisplayName("空文件且 handling=ALLOW，应 SUCCESS")
         void shouldBeSuccessWhenEmptyFileAndAllow() throws Exception {
             when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-            config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
-            when(uploadSupport.processSingleFile(anyString(), any(), any(), anyString(), any()))
-                    .thenReturn(new UploadSupport.UploadResult(0, 1, 0, 0, null));
+            doAnswer(invocation -> {
+                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                        return cb.run(mock(com.fmsy.ftp.FtpClient.class));
+                    }).when(transferSupport).executeWithClient(eq("ftp1"), any());
+            when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
+            when(uploadSupport.insertDataAndVerify(any(), any(), any(ResolvedPath.class), any(), anyString(), any())).thenReturn(0);
 
+            config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
             handler.handle(command, config, result);
 
             assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());

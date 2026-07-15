@@ -167,20 +167,4 @@ class TxtConverterTest {
         }
     }
 
-    @Nested
-    @DisplayName("countRecords")
-    class CountRecordsTests {
-
-        @Test
-        @DisplayName("should count records correctly")
-        void shouldCountRecordsCorrectly() {
-            String txt = "ID|NAME|AGE\n1|John|30\n2|Jane|25\n3|Bob|40";
-            InputStream input = new ByteArrayInputStream(txt.getBytes(StandardCharsets.UTF_8));
-            FieldMapping mapping = createMapping(List.of("ID", "NAME", "AGE"));
-
-            int count = converter.countRecords(input, mapping);
-
-            assertEquals(3, count);
-        }
     }
-}

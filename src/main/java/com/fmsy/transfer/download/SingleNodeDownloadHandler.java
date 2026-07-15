@@ -4,9 +4,11 @@ import com.fmsy.enums.CommandType;
 import com.fmsy.fileops.FlagFileService;
 import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
+import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.transfer.BucketDistributor;
+import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.transfer.download.BucketProcessor.BucketBatchResult;
@@ -37,10 +39,12 @@ public class SingleNodeDownloadHandler implements TransferHandler {
     private final BucketDistributor bucketDistributor;
     private final TransferSupport transferSupport;
     private final DownloadSupport downloadSupport;
+    private final FieldMappingBuilder fieldMappingBuilder;
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
-        log.info("Single node multi-file download");
+        log.info("Single node multi-file download, command={}, table={}",
+                command.getId(), config.getTableName());
         CommandType commandType = command.getCommandType();
 
         // ===== Phase 1: splitFields + 顶层 preCheck =====
@@ -93,11 +97,15 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         }
 
         // ===== Phase 4: 并行桶处理(每桶通过 BucketProcessor 执行管线) =====
+        // 预构建 FieldMapping 供所有桶共享（避免每桶重复查表元数据）
+        FieldMapping sharedMapping = fieldMappingBuilder.buildForDownload(config);
         int concurrency = config.getConcurrency() != null ? config.getConcurrency() : 3;
         BucketBatchResult br = bucketProcessor.processAll(buckets, config, baseFileInfo,
                 config.getFtpName(),
                 BucketProcessingOptions.builder()
                         .pipelineCustomizer((pipelineOpts, bucket, fileInfo) -> {
+                            // 复用预构建的字段映射，避免每桶重复查询表元数据
+                            pipelineOpts.setFieldMapping(sharedMapping);
                             // BATCH 模式:用明细表的 auditCount
                             if (command.getCommandType() == CommandType.BATCH) {
                                 Integer detailAudit = bucket.getAuditCount();

@@ -126,5 +126,77 @@ class TableMetadataServiceTest {
             verify(jdbcTemplate).queryForList(
                     contains("information_schema.columns"), eq("mytable"));
         }
+
+        @Test
+        @DisplayName("should cache results and avoid repeated DB queries")
+        void shouldCacheResults() {
+            // 第一次调用：查询 DB
+            when(jdbcTemplate.queryForList(anyString(), eq("mytable")))
+                    .thenReturn(List.of(
+                            Map.of("column_name", "id"),
+                            Map.of("column_name", "name")
+                    ));
+
+            List<String> first = tableMetadataService.getTableColumns("DB1", "mytable");
+
+            // 第二次调用：应命中缓存，不再查询 DB
+            List<String> second = tableMetadataService.getTableColumns("DB1", "mytable");
+
+            assertEquals(2, first.size());
+            assertEquals(2, second.size());
+            assertEquals(first, second);
+            // verify 只被调用一次（缓存命中，第二次不查 DB）
+            verify(jdbcTemplate, times(1)).queryForList(anyString(), anyString());
+        }
+
+        @Test
+        @DisplayName("should cache null dbName and empty dbName as different keys")
+        void shouldCacheDifferentDbNames() {
+            when(jdbcTemplate.queryForList(anyString(), eq("mytable")))
+                    .thenReturn(List.of(Map.of("column_name", "id")));
+
+            // 不同 dbName 触发不同缓存 key
+            tableMetadataService.getTableColumns("DB1", "mytable");
+            tableMetadataService.getTableColumns("DB2", "mytable");
+
+            // 两个不同 dbName → 两次查询
+            verify(jdbcTemplate, times(2)).queryForList(anyString(), anyString());
+        }
+
+        @Test
+        @DisplayName("should return cached empty list on exception")
+        void shouldCacheEmptyListOnException() {
+            when(jdbcTemplate.queryForList(anyString(), anyString()))
+                    .thenThrow(new RuntimeException("DB error"));
+
+            // 第一次：异常，返回空列表
+            List<String> first = tableMetadataService.getTableColumns("DB1", "mytable");
+            assertTrue(first.isEmpty());
+
+            // 修改 mock 不再抛异常
+            reset(jdbcTemplate);
+            when(jdbcTemplate.queryForList(anyString(), anyString()))
+                    .thenReturn(List.of(Map.of("column_name", "id")));
+
+            // 第二次：应该命中缓存（空列表被缓存），不会触发新查询
+            List<String> second = tableMetadataService.getTableColumns("DB1", "mytable");
+            assertTrue(second.isEmpty());
+            verify(jdbcTemplate, times(0)).queryForList(anyString(), eq("mytable"));
+        }
+
+        @Test
+        @DisplayName("should clear cache on clearCache()")
+        void shouldClearCache() {
+            when(jdbcTemplate.queryForList(anyString(), eq("mytable")))
+                    .thenReturn(List.of(Map.of("column_name", "id")));
+
+            tableMetadataService.getTableColumns("DB1", "mytable");
+            tableMetadataService.clearCache();
+
+            // 清缓存后应重新查询
+            tableMetadataService.getTableColumns("DB1", "mytable");
+
+            verify(jdbcTemplate, times(2)).queryForList(anyString(), anyString());
+        }
     }
 }

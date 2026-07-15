@@ -211,7 +211,10 @@ public class DownloadSupport {
                                     PipelineOptions opts, int recordCount,
                                     String filePath) throws Exception {
         FileConverter converter = converterFactory.get(config.getParserType());
-        FieldMapping mapping = fieldMappingBuilder.buildForDownload(config);
+        // 优先使用调用方预构建的 FieldMapping（多桶场景复用，避免重复查表元数据）
+        FieldMapping mapping = opts.fieldMapping != null
+                ? opts.fieldMapping
+                : fieldMappingBuilder.buildForDownload(config);
 
         try (OutputStream os = client.getOutputStream(filePath)) {
             if (opts.wholeTable) {
@@ -419,6 +422,14 @@ public class DownloadSupport {
          * null 时跳过前稽核,仅计数。
          */
         Integer expectedAuditCount;
+
+        // ========== 字段映射 ==========
+
+        /**
+         * 预构建的字段映射 — 多桶场景下由调用方提前构建一次传入，
+         * 避免每桶重复查询表元数据。为 null 时管线内部自动构建。
+         */
+        FieldMapping fieldMapping;
 
         // ========== 阶段控制 ==========
 

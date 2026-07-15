@@ -128,7 +128,7 @@ public class BucketProcessor {
             result.accumulate(pr, targetFileInfo != null ? targetFileInfo.fullPath() : null);
 
         } catch (Exception e) {
-            log.error("Bucket {} processing failed unexpectedly: {}", bucket.getId(), e.getMessage(), e);
+            log.error("Bucket {} processing failed unexpectedly for table {}: {}", bucket.getId(), config.getTableName(), e.getMessage(), e);
             result.accumulateFailure();
         }
     }

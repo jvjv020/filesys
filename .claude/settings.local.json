@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dir)"
+      "Bash(dir)",
+      "Read(//d/Project/FMSY/**)",
+      "Bash(gradle test *)",
+      "Bash(xargs grep -l \"failures\\\\|FAILED\\\\|failed\")",
+      "Bash(xargs grep -l 'failures=\"[^0]')",
+      "Bash(xargs grep -l 'failures=\"[1-9]\"')"
     ]
   }
 }

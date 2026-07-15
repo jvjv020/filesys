@@ -26,7 +26,8 @@ public class SingleDownloadHandler implements TransferHandler {
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
-        log.info("Single file download");
+        log.info("Single file download, command={}, table={}",
+                command.getId(), config.getTableName());
         String ftpName = config.getFtpName();
         ResolvedPath fileInfo = transferSupport.resolveFilePath(config.getFilePath(), command);
 

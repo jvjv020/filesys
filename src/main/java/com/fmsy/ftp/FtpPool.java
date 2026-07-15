@@ -157,6 +157,10 @@ public class FtpPool {
             this.config = config;
         }
 
+        String getFtpId() {
+            return config.getId();
+        }
+
         // ---------- 即借即用:withClient 核心 ----------
 
         /**
@@ -179,7 +183,7 @@ public class FtpPool {
             try {
                 return action.run(client);
             } catch (IOException e) {
-                log.warn("FTP IO failed, retrying with new connection: {}", e.getMessage());
+                log.warn("FTP IO failed for {}, retrying with new connection: {}", config.getId(), e.getMessage());
             } catch (Exception e) {
                 throw wrap(e, config.getId());
             } finally {

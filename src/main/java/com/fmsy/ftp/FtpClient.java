@@ -48,6 +48,11 @@ public class FtpClient {
         this.holder = holder;
     }
 
+    /** 返回此客户端所属的 FTP 连接池标识 */
+    public String getFtpId() {
+        return holder.getFtpId();
+    }
+
     FTPClient getClient() {
         return client;
     }
@@ -84,7 +89,7 @@ public class FtpClient {
 
     /** 连接失败处理 - 从池中移除失效连接(失败一次即销毁,不再复用) */
     private void handleConnectionFailure() {
-        log.error("FTP connection failed, removing dead client from pool");
+        log.error("FTP connection failed for {}, removing dead client from pool", holder.getFtpId());
         holder.removeClient(client);
     }
 

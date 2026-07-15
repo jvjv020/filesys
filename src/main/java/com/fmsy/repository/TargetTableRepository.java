@@ -212,7 +212,7 @@ public class TargetTableRepository {
         List<String> resolvedOrderBy = resolveOrderByWithPkFallback(dbName, tableName, orderBy);
         String baseSql = buildSelectSql(listOrEmpty(fields), distinct, List.of(), resolvedOrderBy, limit);
         return new PartitionSequentialIterator(
-                getDataSource(dbName), partitions, baseSql, List.of(), SystemConstants.DEFAULT_BATCH_SIZE);
+                getDataSource(dbName), partitions, baseSql, List.of(), SystemConstants.DEFAULT_BATCH_SIZE, tableName);
     }
 
     /**
@@ -256,7 +256,7 @@ public class TargetTableRepository {
         List<String> resolvedOrderBy = resolveOrderByWithPkFallback(dbName, tableName, orderBy);
         SqlStatement stmt = SqlBuilder.buildSelectParametric(
                 tableName, listOrEmpty(fields), distinct, listOrEmpty(predicates), listOrEmpty(params), resolvedOrderBy, limit, null);
-        return new StreamingQuery(getDataSource(dbName), stmt, SystemConstants.DEFAULT_BATCH_SIZE);
+        return new StreamingQuery(getDataSource(dbName), stmt, SystemConstants.DEFAULT_BATCH_SIZE, tableName);
     }
 
     // ==================== 桶数据查询 ====================
@@ -272,7 +272,7 @@ public class TargetTableRepository {
     public DataStream streamTableDirect(String dbName, String tableName, List<String> orderBy) {
         SqlStatement stmt = SqlBuilder.buildSelectParametric(
                 tableName, List.of(), false, List.of(), List.of(), listOrEmpty(orderBy), null, null);
-        return new StreamingQuery(getDataSource(dbName), stmt, SystemConstants.DEFAULT_BATCH_SIZE);
+        return new StreamingQuery(getDataSource(dbName), stmt, SystemConstants.DEFAULT_BATCH_SIZE, tableName);
     }
 
     /**
@@ -295,14 +295,14 @@ public class TargetTableRepository {
                 List<String> predicates = buildBucketPredicates(splitField, String.valueOf(fieldValue), params);
                 String baseSql = buildSelectSql(List.of(), false, predicates, orderBy, null);
                 return new PartitionSequentialIterator(getDataSource(dbName), partitions,
-                        baseSql, params, SystemConstants.DEFAULT_BATCH_SIZE);
+                        baseSql, params, SystemConstants.DEFAULT_BATCH_SIZE, tableName);
             }
         }
         List<Object> params = new ArrayList<>();
         List<String> predicates = buildBucketPredicates(splitField, String.valueOf(fieldValue), params);
         SqlStatement stmt = SqlBuilder.buildSelectParametric(
                 tableName, List.of(), false, predicates, params, orderBy, null, null);
-        return new StreamingQuery(getDataSource(dbName), stmt, SystemConstants.DEFAULT_BATCH_SIZE);
+        return new StreamingQuery(getDataSource(dbName), stmt, SystemConstants.DEFAULT_BATCH_SIZE, tableName);
     }
 
     private static List<String> buildBucketPredicates(String splitField, String fieldValue, List<Object> params) {
@@ -344,10 +344,15 @@ public class TargetTableRepository {
         private final int batchSize;
         private final boolean restoreAutoCommit;
         private final List<String> columnLabels;
+        private final String tableName;
         private boolean hasNext;
         private boolean closed;
 
         StreamingQuery(DataSource dataSource, SqlStatement stmt, int batchSize) {
+            this(dataSource, stmt, batchSize, null);
+        }
+
+        StreamingQuery(DataSource dataSource, SqlStatement stmt, int batchSize, String tableName) {
             Connection conn = null;
             PreparedStatement ps = null;
             ResultSet rs = null;
@@ -371,6 +376,7 @@ public class TargetTableRepository {
                 this.statement = ps;
                 this.resultSet = rs;
                 this.batchSize = batchSize;
+                this.tableName = tableName;
                 this.restoreAutoCommit = restore;
                 this.columnLabels = columnLabels(rs);
                 this.hasNext = resultSet.next();
@@ -455,18 +461,18 @@ public class TargetTableRepository {
             try {
                 resultSet.close();
             } catch (SQLException e) {
-                log.warn("Failed to close streaming ResultSet: {}", e.getMessage());
+                log.warn("Failed to close streaming ResultSet for table {}: {}", tableName, e.getMessage());
             }
             try {
                 statement.close();
             } catch (SQLException e) {
-                log.warn("Failed to close streaming PreparedStatement: {}", e.getMessage());
+                log.warn("Failed to close streaming PreparedStatement for table {}: {}", tableName, e.getMessage());
             }
             if (restoreAutoCommit) {
                 try {
                     connection.setAutoCommit(true);
                 } catch (SQLException e) {
-                    log.warn("Failed to restore streaming connection autoCommit: {}", e.getMessage());
+                    log.warn("Failed to restore streaming connection autoCommit for table {}: {}", tableName, e.getMessage());
                 }
             }
             DataSourceUtils.releaseConnection(connection, dataSource);
@@ -490,17 +496,20 @@ public class TargetTableRepository {
         private final String baseSqlTemplate;
         private final List<Object> baseParams;
         private final int batchSize;
+        private final String tableName;
         private int currentIndex;
         private StreamingQuery currentStream;
         private boolean closed;
 
         PartitionSequentialIterator(DataSource dataSource, List<String> partitions,
-                                      String baseSqlTemplate, List<Object> baseParams, int batchSize) {
+                                      String baseSqlTemplate, List<Object> baseParams, int batchSize,
+                                      String tableName) {
             this.dataSource = dataSource;
             this.partitions = partitions;
             this.baseSqlTemplate = baseSqlTemplate;
             this.baseParams = baseParams;
             this.batchSize = batchSize;
+            this.tableName = tableName;
             this.currentIndex = 0;
             this.currentStream = null;
             this.closed = false;
@@ -545,7 +554,8 @@ public class TargetTableRepository {
                 try {
                     currentStream.close();
                 } catch (Exception e) {
-                    log.warn("Failed to close partition stream: {}", e.getMessage());
+                    log.warn("Failed to close partition stream for table {}, partition {}: {}",
+                            tableName, currentIndex > 0 ? partitions.get(currentIndex - 1) : "unknown", e.getMessage());
                 }
                 currentStream = null;
             }
@@ -554,7 +564,7 @@ public class TargetTableRepository {
         private StreamingQuery openStreamForPartition(String partitionName) {
             String sql = baseSqlTemplate.replace(TABLE_PLACEHOLDER, partitionName);
             SqlStatement stmt = new SqlStatement(sql, baseParams);
-            return new StreamingQuery(dataSource, stmt, batchSize);
+            return new StreamingQuery(dataSource, stmt, batchSize, tableName);
         }
     }
 }

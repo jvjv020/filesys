@@ -47,22 +47,23 @@ public class FieldMappingBuilder {
     private final ConverterFactory converterFactory;
 
     /**
-     * 构建上传场景的 FieldMapping。
+     * 构建上传场景的 FieldMapping（仅基础部分，不含 extraFields）。
+     *
+     * <p>与 {@link #buildForUpload(TransferConfig, Map)} 的区别在于不处理 detail 的 extraFields，
+     * 适用于 BATCH 模式中所有明细共享同一张表、仅 extraFields 不同的场景。
+     * 调用方先构建一次 base，再对每个明细调用 {@link #attachExtraFields(FieldMapping, Map)} 附加 extras。
      *
      * <p>步骤:
      * <ol>
      *   <li>读目标表元数据作为 base 字段列表</li>
-     *   <li>排除 {@code ignoreFields}(配置层:这些字段不参与传输)</li>
-     *   <li>解析 detail 的 fieldName/fieldValue 为 extraFields(固定值映射)</li>
-     *   <li>{@code tableFields} = base 字段列表(extraFields 中的字段也保留在其中,
-     *       写入时通过 {@link FieldMapping#getValue} 回退到 extraFields 取值)</li>
+     *   <li>排除 {@code ignoreFields}</li>
+     *   <li>extraFields 保持 null</li>
      * </ol>
      *
      * @param config 传输配置
-     * @param detail 明细行(可空;为 null 时不处理 extraFields)
-     * @return 完整 FieldMapping
+     * @return 不含 extraFields 的 FieldMapping
      */
-    public FieldMapping buildForUpload(TransferConfig config, Map<String, Object> detail) {
+    public FieldMapping buildForUploadBase(TransferConfig config) {
         if (config == null) {
             FieldMapping mapping = new FieldMapping();
             mapping.setConfig(null);
@@ -71,21 +72,52 @@ public class FieldMappingBuilder {
         FieldMapping mapping = new FieldMapping();
         mapping.setConfig(applyParserConfig(config));
         List<String> columns = tableMetadataService.getTableColumns(config.getDbName(), config.getTableName());
-        // 排除 ignoreFields
         columns = excludeFields(columns, config.getIgnoreFields());
-
         mapping.setTableFields(new ArrayList<>(columns));
-
-        if (detail != null) {
-            Map<String, String> extras = extractExtraFields(detail);
-            if (!extras.isEmpty()) {
-                mapping.setExtraFields(extras);
-            }
-        }
-        log.debug("buildForUpload: db={}, table={}, columns={}, hasExtras={}",
-                config.getDbName(), config.getTableName(), columns,
-                mapping.getExtraFields() != null);
+        log.debug("buildForUploadBase: db={}, table={}, columns={}",
+                config.getDbName(), config.getTableName(), columns);
         return mapping;
+    }
+
+    /**
+     * 向基础 FieldMapping 附加 extraFields（从明细行解析）。
+     *
+     * <p>返回新的 FieldMapping 对象，不修改传入的 base 映射（线程安全）。
+     * 若 detail 为 null 或不含 extraFields，直接返回 base 本身。
+     *
+     * @param base   基础映射（由 {@link #buildForUploadBase} 或 {@link #buildForUpload} 构建）
+     * @param detail 明细行（可空；为 null 时返回 base）
+     * @return 含 extraFields 的新 FieldMapping（或 base 本身）
+     */
+    public FieldMapping attachExtraFields(FieldMapping base, Map<String, Object> detail) {
+        if (detail == null) {
+            return base;
+        }
+        Map<String, String> extras = extractExtraFields(detail);
+        if (extras.isEmpty()) {
+            return base;
+        }
+        // 克隆 base 并附加 extras（不修改原对象，线程安全）
+        FieldMapping copy = new FieldMapping();
+        copy.setConfig(base.getConfig());
+        copy.setTableFields(new ArrayList<>(base.getTableFields()));
+        copy.setExtraFields(extras);
+        return copy;
+    }
+
+    /**
+     * 构建上传场景的完整 FieldMapping（含 extraFields）。
+     *
+     * <p>内部先调用 {@link #buildForUploadBase} 构建基础部分，再根据 detail 附加 extraFields。
+     * 若 detail 为 null，等效于 {@code buildForUploadBase(config)}。</p>
+     *
+     * @param config 传输配置
+     * @param detail 明细行（可空；为 null 时不处理 extraFields）
+     * @return 完整 FieldMapping
+     */
+    public FieldMapping buildForUpload(TransferConfig config, Map<String, Object> detail) {
+        FieldMapping base = buildForUploadBase(config);
+        return attachExtraFields(base, detail);
     }
 
     /**

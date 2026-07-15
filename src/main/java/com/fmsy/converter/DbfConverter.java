@@ -59,24 +59,8 @@ public class DbfConverter implements FileConverter {
         writeHeader(output, mapping, 0);
         int count = writeDataRecords(output, data, mapping);
         writeFooter(output, mapping);
-        log.info("Generated DBF with {} records", count);
-    }
-
-    @Override
-    public int countRecords(InputStream input, FieldMapping mapping) {
-        try {
-            input.skipNBytes(4);
-            byte[] recordCountBytes = new byte[4];
-            int read = input.read(recordCountBytes);
-            if (read < 4) return -1;
-            int count = (recordCountBytes[3] << 24) | ((recordCountBytes[2] & 0xFF) << 16)
-                      | ((recordCountBytes[1] & 0xFF) << 8) | (recordCountBytes[0] & 0xFF);
-            log.info("DBF countRecords: {} records (from header)", count);
-            return count;
-        } catch (IOException e) {
-            log.warn("Failed to count DBF records: {}", e.getMessage());
-            return -1;
-        }
+        String table = mapping != null && mapping.getConfig() != null ? mapping.getConfig().getTableName() : null;
+        log.info("Generated DBF with {} records{}", count, table != null ? " for table " + table : "");
     }
 
     @Override

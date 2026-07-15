@@ -173,32 +173,4 @@ class CsvConverterTest {
         }
     }
 
-    @Nested
-    @DisplayName("countRecords")
-    class CountRecordsTests {
-
-        @Test
-        @DisplayName("should count records correctly with header")
-        void shouldCountRecordsCorrectlyWithHeader() {
-            String csv = "ID,NAME\n1,John\n2,Jane\n3,Bob";
-            InputStream input = new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8));
-            FieldMapping mapping = createMappingWithConfig(List.of("ID", "NAME"), "{\"header\":true}");
-
-            int count = converter.countRecords(input, mapping);
-
-            assertEquals(3, count);
-        }
-
-        @Test
-        @DisplayName("should count records correctly without header")
-        void shouldCountRecordsCorrectlyWithoutHeader() {
-            String csv = "1,John\n2,Jane\n3,Bob";
-            InputStream input = new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8));
-            FieldMapping mapping = createMapping(List.of("ID", "NAME"));
-
-            int count = converter.countRecords(input, mapping);
-
-            assertEquals(3, count);
-        }
     }
-}
