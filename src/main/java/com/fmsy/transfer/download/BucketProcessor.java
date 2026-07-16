@@ -24,7 +24,7 @@ import java.util.function.IntFunction;
 /**
  * 桶处理器 — 将桶列表并行派发到 {@link DownloadSupport#executePipeline} 并聚合结果。
  *
- * <p>抽取自 {@link SingleNodeDownloadHandler} 和 {@link com.fmsy.transfer.download.SChildCommandProcessor}
+ * <p>抽取自 {@link SingleNodeDownloadHandler} 和 {@link com.fmsy.transfer.download.ChildBucketProcessor}
  * 中的桶级并行处理逻辑，消除两处 processBucket 重复代码。
  *
  * <p>每桶处理流程:

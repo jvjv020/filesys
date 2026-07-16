@@ -257,6 +257,24 @@ public class FtpClient {
         }
     }
 
+    /**
+     * 追加数据到 FTP 文件（APPE 命令）。
+     *
+     * <p>合并流程使用：将子节点生成的临时文件内容追加到目标文件。
+     *
+     * @param path 目标文件路径
+     * @param in   要追加的数据输入流
+     */
+    public void append(String path, InputStream in) throws IOException {
+        FilePathUtils.validatePath(path);
+        try {
+            client.appendFile(path, in);
+        } catch (IOException e) {
+            handleConnectionFailure();
+            throw e;
+        }
+    }
+
     /** 关闭客户端（归还连接到池） */
     public void close() {
         holder.returnClient(this);

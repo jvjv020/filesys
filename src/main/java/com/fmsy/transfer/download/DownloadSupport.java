@@ -43,7 +43,7 @@ import java.util.Map;
  * <ul>
  *   <li>{@link SingleDownloadHandler} — 整表模式,开启全部阶段</li>
  *   <li>{@link SingleNodeDownloadHandler} — 分桶模式,跳过前操作/后稽核(聚合层做)</li>
- *   <li>{@link com.fmsy.transfer.download.SChildCommandProcessor} — 分桶模式,开启前操作+后稽核</li>
+ *   <li>{@link com.fmsy.transfer.download.ChildBucketProcessor} — 分桶模式,开启前操作+后稽核</li>
  * </ul>
  */
 @Slf4j

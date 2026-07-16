@@ -85,10 +85,10 @@ public class ConfigLoaderService {
      * <ul>
      *   <li>{@code TransferService.process} / {@code BatchDispatcher.dispatch}:主命令竞争成功后
      *       业务方已派发,后续路径配置消失时不应再阻断主流程</li>
-     *   <li>{@code SChildCommandProcessor.writeSubCommandResult}:子命令执行期间配置被卸载
+     *   <li>{@code ChildBucketProcessor.pollAndProcess}:子命令执行期间配置被卸载
      *       也得能写一条结果表</li>
-     *   <li>{@code ChildCommandMonitor.updateMainCommandStatus}:子节点监控完成时配置刚好被卸载
-     *       也不阻塞 TOTAL_FLAG 流程</li>
+     *   <li>{@code MergeFlowService.updateMainStatus}:合并完成时配置刚好被卸载
+     *       也不阻塞合并流程</li>
      * </ul>
      * <p>与 {@link #getConfigOrThrow} 的区别:这里只 WARN,不抛异常,调用方按 null 自行降级。
      */

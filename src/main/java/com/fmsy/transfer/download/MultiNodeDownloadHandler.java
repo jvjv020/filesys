@@ -13,21 +13,21 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 /**
- * DOWNLOAD_MULTI_NODE 场景:主命令分桶后创建 S 型子命令,各节点竞争处理。
+ * DOWNLOAD_MULTI_NODE 场景:创建 S 型子命令供各节点竞争处理,然后由异步的
+ * SplitFlowService(分桶) + MergeFlowService(合并) + ChildBucketProcessor(子节点处理)完成全过程。
  *
  * <ul>
  *   <li>BATCH 模式:复用明细表已存在的桶,更新每个桶的 auditCount,再创建 S 子命令</li>
  *   <li>SERIAL 模式:从目标表 streamQuery DISTINCT 拿分桶值,创建桶 + 创建 S 子命令</li>
- *   <li>成功:result.markChildrenCreated(childCount)(主命令保持 PROCESSING,
- *       由 {@code AbstractTransferOrchestrator} finalize 之后统一启停 monitor)</li>
- *   <li>失败:result.markChildrenFailed(reason)(主命令置 ERROR,不启 monitor)</li>
+ *   <li>成功:result.markChildrenCreated()(主命令保持 PROCESSING,
+ *       由 MergeFlowService 在合并完成后更新终态)</li>
+ *   <li>失败:result.markChildrenFailed(reason)(主命令置 ERROR)</li>
  * </ul>
  *
- * <p>子命令的并发执行由 {@link SChildCommandProcessor} 接管(本 Handler 不参与)。
+ * <p>子命令的并发执行由 {@link ChildBucketProcessor} 接管(本 Handler 不参与)。
  *
  * <p>preCheck 用短生命周期 FTP 连接,完成后立即归还;
  * createChildren 为纯 DB 操作时不持有 FTP 连接。
- * monitor 启停由 Orchestrator 统一调度。
  */
 @Slf4j
 @Component

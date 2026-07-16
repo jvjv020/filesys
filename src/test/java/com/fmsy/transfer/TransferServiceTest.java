@@ -5,7 +5,7 @@ import com.fmsy.enums.CommandType;
 import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.model.Command;
 import com.fmsy.model.TransferConfig;
-import com.fmsy.transfer.download.SChildCommandProcessor;
+import com.fmsy.transfer.download.ChildBucketProcessor;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.transfer.TransferOrchestrator;
 import com.fmsy.util.ColumnNames;
@@ -33,7 +33,7 @@ class TransferServiceTest {
     private ConfigLoaderService configLoader;
 
     @Mock
-    private SChildCommandProcessor sChildCommandProcessor;
+    private ChildBucketProcessor childBucketProcessor;
 
     @Mock
     private AppConfig appConfig;
@@ -49,7 +49,7 @@ class TransferServiceTest {
     @BeforeEach
     void setUp() {
         transferService = new TransferService(transferOrchestrator, configLoader,
-                sChildCommandProcessor, appConfig, commandRepository, tempConfigFactory);
+                childBucketProcessor, appConfig, commandRepository, tempConfigFactory);
         when(appConfig.getNodeId()).thenReturn("node-1");
     }
 
@@ -169,8 +169,8 @@ class TransferServiceTest {
     class ProcessCoordinatedRouting {
 
         @Test
-        @DisplayName("should route COORDINATED commands to SChildCommandProcessor")
-        void shouldRouteCoordinatedToSChildCommandProcessor() {
+        @DisplayName("should route COORDINATED DOWNLOAD to ChildBucketProcessor")
+        void shouldRouteCoordinatedDownloadToChildBucketProcessor() {
             Command command = new Command();
             command.setId(2L);
             command.setCategoryCode("CAT001");
@@ -187,57 +187,13 @@ class TransferServiceTest {
 
             transferService.process(2L, "DOWNLOAD");
 
-            verify(sChildCommandProcessor).pollAndProcess("node-1", "1", command);
+            verify(childBucketProcessor).pollAndProcess("node-1", command, config);
             verifyNoInteractions(transferOrchestrator);
         }
 
         @Test
-        @DisplayName("should extract mainCommandId from extraInfo with pipe")
-        void shouldExtractMainCommandIdFromExtraInfo() {
-            Command command = new Command();
-            command.setId(3L);
-            command.setCategoryCode("CAT001");
-            command.setControlCode("CTRL001");
-            command.setCommandType(CommandType.COORDINATED);
-            command.setExtraInfo("100|/base/path.csv");
-
-            TransferConfig config = new TransferConfig();
-            config.setCategoryCode("CAT001");
-            config.setControlCode("CTRL001");
-
-            when(commandRepository.findById(3L)).thenReturn(command);
-            when(configLoader.getConfigOrDefault("CAT001", "CTRL001")).thenReturn(config);
-
-            transferService.process(3L, "DOWNLOAD");
-
-            verify(sChildCommandProcessor).pollAndProcess("node-1", "100", command);
-        }
-
-        @Test
-        @DisplayName("should use whole extraInfo as mainCommandId when no pipe")
-        void shouldUseWholeExtraInfoWhenNoPipe() {
-            Command command = new Command();
-            command.setId(4L);
-            command.setCategoryCode("CAT001");
-            command.setControlCode("CTRL001");
-            command.setCommandType(CommandType.COORDINATED);
-            command.setExtraInfo("200");
-
-            TransferConfig config = new TransferConfig();
-            config.setCategoryCode("CAT001");
-            config.setControlCode("CTRL001");
-
-            when(commandRepository.findById(4L)).thenReturn(command);
-            when(configLoader.getConfigOrDefault("CAT001", "CTRL001")).thenReturn(config);
-
-            transferService.process(4L, "DOWNLOAD");
-
-            verify(sChildCommandProcessor).pollAndProcess("node-1", "200", command);
-        }
-
-        @Test
-        @DisplayName("should NOT route COORDINATED to SChildCommandProcessor for UPLOAD")
-        void shouldNotRouteCoordinatedUploadToSChildCommandProcessor() throws Exception {
+        @DisplayName("should NOT route COORDINATED to ChildBucketProcessor for UPLOAD")
+        void shouldNotRouteCoordinatedUploadToChildBucketProcessor() throws Exception {
             Command command = new Command();
             command.setId(5L);
             command.setCategoryCode("CAT001");
@@ -255,7 +211,7 @@ class TransferServiceTest {
 
             // Non-download COORDINATED goes to orchestrator
             verify(transferOrchestrator).execute(command, config);
-            verifyNoInteractions(sChildCommandProcessor);
+            verifyNoInteractions(childBucketProcessor);
         }
     }
 

@@ -25,6 +25,6 @@
 
 ## 桶竞争流程（DOWNLOAD_MULTI_NODE）
 
-S 型子命令（桶）处理已移至 `transfer/download/SChildCommandProcessor`，
-与 `MultiNodeDownloadHandler`、`ChildCommandMonitor` 同属 `transfer/download` 包，
+S 型子命令（桶）处理已移至 `transfer/download/ChildBucketProcessor`，
+与 `MultiNodeDownloadHandler`、`SplitFlowService`、`MergeFlowService` 同属 `transfer/download` 包，
 实现 DOWNLOAD_MULTI_NODE 全流程紧凑协作。

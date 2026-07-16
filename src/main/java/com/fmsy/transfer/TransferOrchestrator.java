@@ -8,7 +8,6 @@ import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.ResultRepository;
-import com.fmsy.transfer.download.ChildCommandMonitor;
 import com.fmsy.transfer.download.MultiNodeDownloadHandler;
 import com.fmsy.transfer.download.SingleDownloadHandler;
 import com.fmsy.transfer.download.SingleNodeDownloadHandler;
@@ -28,7 +27,7 @@ import org.springframework.stereotype.Service;
  *
  * <p>
  * COORDINATED(S) 类型的 DOWNLOAD_MULTI_NODE 命令不由本类处理，
- * 而是由 TransferService 直接转给 SChildCommandProcessor。
+ * 而是由 TransferService 直接转给 ChildBucketProcessor。
  */
 @Service
 public class TransferOrchestrator extends AbstractTransferOrchestrator {
@@ -46,9 +45,8 @@ public class TransferOrchestrator extends AbstractTransferOrchestrator {
             MultiNodeDownloadHandler multiNodeDownload,
             CommandRepository commandRepository,
             ResultRepository resultRepository,
-            ChildCommandMonitor childCommandMonitor,
             DataSourceConfig.DbPool dbPool) {
-        super(commandRepository, resultRepository, childCommandMonitor, dbPool);
+        super(commandRepository, resultRepository, dbPool);
         this.singleUpload = singleUpload;
         this.multiUpload = multiUpload;
         this.singleDownload = singleDownload;
@@ -66,7 +64,12 @@ public class TransferOrchestrator extends AbstractTransferOrchestrator {
                 singleUpload.handle(command, config, result);
                 break;
             case UPLOAD_MULTI:
-                multiUpload.handle(command, config, result);
+                // BATCH（明细表指定文件）由 SingleUploadHandler 处理，其余走 MultiUploadHandler
+                if (command.getCommandType() == CommandType.BATCH) {
+                    singleUpload.handle(command, config, result);
+                } else {
+                    multiUpload.handle(command, config, result);
+                }
                 break;
             case DOWNLOAD_SINGLE:
                 singleDownload.handle(command, config, result);

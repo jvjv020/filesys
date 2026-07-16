@@ -21,7 +21,7 @@ import java.util.Map;
  *   <li>{@code transfer/BucketDistributor} — competeBucket / countEmptyBuckets / createBuckets</li>
  *   <li>{@code transfer/upload/MultiUploadHandler} — findUploadDetails</li>
  *   <li>{@code transfer/download/MultiNodeDownloadHandler} — updateAuditCount</li>
- *   <li>{@code transfer/download/SChildCommandProcessor} — findBucketData(动态表名,见 TargetTableRepository)</li>
+ *   <li>{@code transfer/download/ChildBucketProcessor} — 子节点桶处理</li>
  * </ul>
  */
 @Slf4j
@@ -38,12 +38,12 @@ public class DetailRepository {
         return dbPool.getJdbcTemplate(ColumnNames.DEFAULT_DB);
     }
 
-    /** 字段列表(SELECT 与 Detail 行映射共用)— 包含桶分发的关键字段 */
+    /** 字段列表(SELECT 与 Detail 行映射共用)— 包含桶分发的关键字段和桶规格名 */
     private static final String SELECT_FIELDS =
         ColumnNames.ID + ", " + ColumnNames.DETAIL_COMMAND_ID + ", " +
         ColumnNames.CATEGORY_CODE + ", " + ColumnNames.CONTROL_CODE + ", " +
         ColumnNames.FIELD_VALUE + ", " + ColumnNames.AUDIT_COUNT + ", " +
-        ColumnNames.PROCESS_STATUS;
+        ColumnNames.PROCESS_STATUS + ", " + ColumnNames.SPEC_NAME;
 
     private static final RowMapper<Detail> DETAIL_MAPPER = (rs, rowNum) -> {
         Detail detail = new Detail();
@@ -54,6 +54,7 @@ public class DetailRepository {
         detail.setFieldValue(rs.getString(ColumnNames.FIELD_VALUE));
         detail.setAuditCount(rs.getInt(ColumnNames.AUDIT_COUNT));
         detail.setStatus(rs.getString(ColumnNames.PROCESS_STATUS));
+        detail.setSpecName(rs.getString(ColumnNames.SPEC_NAME));
         return detail;
     };
 
@@ -189,5 +190,92 @@ public class DetailRepository {
         }
         getJdbc().update(sql.toString(), params.toArray());
         log.info("Created {} buckets for command {}", bucketValues.size(), commandId);
+    }
+
+    // ==================== 统计(Plan B 拆分+合并流程) ====================
+
+    private static final String SQL_COUNT_BY_STATUS =
+        "SELECT COUNT(*) FROM " + TableNames.DETAIL_TABLE +
+        " WHERE " + ColumnNames.DETAIL_COMMAND_ID + "=? AND " +
+        ColumnNames.PROCESS_STATUS + "=?";
+
+    /**
+     * 统计某主命令下指定状态的明细数。
+     *
+     * @param commandId 主命令 ID
+     * @param status    要统计的状态（如 STATUS_EMPTY / STATUS_SUCCESS）
+     * @return 该状态的行数
+     */
+    public int countByStatus(Long commandId, String status) {
+        Integer count = getJdbc().queryForObject(SQL_COUNT_BY_STATUS, Integer.class,
+                commandId, status);
+        return count != null ? count : 0;
+    }
+
+    // ==================== 批量状态更新(合并流程) ====================
+
+    private static final String SQL_BATCH_UPDATE_STATUS =
+        "UPDATE " + TableNames.DETAIL_TABLE + " SET " +
+        ColumnNames.PROCESS_STATUS + "=? " +
+        "WHERE " + ColumnNames.DETAIL_COMMAND_ID + "=? AND " +
+        ColumnNames.PROCESS_STATUS + "=?";
+
+    /**
+     * 批量更新某命令下所有指定旧状态的明细为新状态。
+     *
+     * @param commandId 主命令 ID
+     * @param oldStatus 旧状态
+     * @param newStatus 新状态
+     * @return 受影响行数
+     */
+    public int batchUpdateStatus(Long commandId, String oldStatus, String newStatus) {
+        int affected = getJdbc().update(SQL_BATCH_UPDATE_STATUS, newStatus, commandId, oldStatus);
+        if (affected > 0) {
+            log.info("Batch updated {} details from '{}' to '{}' for command {}",
+                    affected, oldStatus, newStatus, commandId);
+        }
+        return affected;
+    }
+
+    // ==================== 从桶规格创建明细(Plan B 切分) ====================
+
+    /**
+     * 从桶规格名列表批量创建明细行（Plan B 切分输出）。
+     *
+     * <p>每行包含 commandId、类别/控制代号、拆分字段信息、specName。
+     *
+     * @param commandId     主命令 ID
+     * @param specNames     桶规格名列表，格式 "分区名|pkStart|pkEnd"
+     * @param splitField    拆分字段名（可为 null，单文件下发时传 null）
+     * @param splitValue    拆分字段值（可为 null）
+     * @param categoryCode  类别代号
+     * @param controlCode   控制代号
+     */
+    public void createBucketsFromSpec(Long commandId, List<String> specNames,
+                                       String splitField, String splitValue,
+                                       String categoryCode, String controlCode) {
+        if (specNames == null || specNames.isEmpty()) return;
+
+        StringBuilder sql = new StringBuilder("INSERT INTO " + TableNames.DETAIL_TABLE + " (" +
+                ColumnNames.DETAIL_COMMAND_ID + ", " + ColumnNames.CATEGORY_CODE + ", " +
+                ColumnNames.CONTROL_CODE + ", " + ColumnNames.FIELD_NAME + ", " +
+                ColumnNames.FIELD_VALUE + ", " + ColumnNames.SPEC_NAME + ", " +
+                ColumnNames.PROCESS_STATUS + ") VALUES ");
+        for (int i = 0; i < specNames.size(); i++) {
+            if (i > 0) sql.append(", ");
+            sql.append("(?, ?, ?, ?, ?, ?, ?)");
+        }
+        List<Object> params = new ArrayList<>();
+        for (String specName : specNames) {
+            params.add(commandId);
+            params.add(categoryCode);
+            params.add(controlCode);
+            params.add(splitField != null ? splitField : "");
+            params.add(splitValue != null ? splitValue : "");
+            params.add(specName);
+            params.add(ColumnNames.STATUS_EMPTY);
+        }
+        getJdbc().update(sql.toString(), params.toArray());
+        log.info("Created {} buckets from spec for command {}", specNames.size(), commandId);
     }
 }

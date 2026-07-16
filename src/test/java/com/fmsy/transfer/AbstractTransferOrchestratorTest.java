@@ -7,7 +7,6 @@ import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.ResultRepository;
-import com.fmsy.transfer.download.ChildCommandMonitor;
 import com.fmsy.util.ColumnNames;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -38,9 +37,6 @@ class AbstractTransferOrchestratorTest {
     private ResultRepository resultRepository;
 
     @Mock
-    private ChildCommandMonitor childCommandMonitor;
-
-    @Mock
     private DataSourceConfig.DbPool dbPool;
 
     @Mock
@@ -50,8 +46,7 @@ class AbstractTransferOrchestratorTest {
 
     @BeforeEach
     void setUp() {
-        testOrchestrator = new TestOrchestrator(commandRepository, resultRepository,
-                childCommandMonitor, dbPool);
+        testOrchestrator = new TestOrchestrator(commandRepository, resultRepository, dbPool);
         when(dbPool.getTransactionTemplate(any())).thenReturn(transactionTemplate);
         when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
             var callback = invocation.getArgument(0,
@@ -69,9 +64,8 @@ class AbstractTransferOrchestratorTest {
 
         TestOrchestrator(CommandRepository commandRepository,
                          ResultRepository resultRepository,
-                         ChildCommandMonitor childCommandMonitor,
                          DataSourceConfig.DbPool dbPool) {
-            super(commandRepository, resultRepository, childCommandMonitor, dbPool);
+            super(commandRepository, resultRepository, dbPool);
         }
 
         void setThrowInDispatch(boolean throwInDispatch) {
@@ -206,102 +200,19 @@ class AbstractTransferOrchestratorTest {
             config.setFtpName("ftp1");
             config.setTableName("table1");
 
-            // Use orchestrator that marks children created
-            TestOrchestrator withMonitor = new TestOrchestrator(commandRepository,
-                    resultRepository, childCommandMonitor, dbPool) {
+            // Use orchestrator that marks children created (suppresses finalize)
+            TestOrchestrator suppressOrchestrator = new TestOrchestrator(commandRepository,
+                    resultRepository, dbPool) {
                 @Override
                 protected void dispatch(Command command, TransferConfig config, Result result) {
-                    result.markChildrenCreated(3);
+                    result.markChildrenCreated();
                 }
             };
 
-            withMonitor.execute(command, config);
+            suppressOrchestrator.execute(command, config);
 
             verify(commandRepository, never()).updateStatus(anyLong(), anyString());
             verify(resultRepository, never()).insert(any(Result.class));
-        }
-    }
-
-    @Nested
-    @DisplayName("execute - child monitor")
-    class ExecuteChildMonitor {
-
-        @Test
-        @DisplayName("should start child monitor when needsChildMonitor is true")
-        void shouldStartChildMonitorWhenNeeded() {
-            Command command = new Command();
-            command.setId(5L);
-            command.setCategoryCode("CAT");
-            command.setControlCode("CTRL");
-
-            TransferConfig config = new TransferConfig();
-            config.setScenario(TransferScenario.DOWNLOAD_MULTI_NODE);
-            config.setDbName("DB1");
-            config.setFilePath("/path");
-            config.setFtpName("ftp1");
-            config.setTableName("table1");
-
-            TestOrchestrator withMonitor = new TestOrchestrator(commandRepository,
-                    resultRepository, childCommandMonitor, dbPool) {
-                @Override
-                protected void dispatch(Command command, TransferConfig config, Result result) {
-                    result.markChildrenCreated(3);
-                }
-            };
-
-            withMonitor.execute(command, config);
-
-            verify(childCommandMonitor).start(5L, 3, "DB1");
-        }
-
-        @Test
-        @DisplayName("should not start child monitor when needsChildMonitor is false")
-        void shouldNotStartChildMonitorWhenNotNeeded() {
-            Command command = new Command();
-            command.setId(6L);
-            command.setCategoryCode("CAT");
-            command.setControlCode("CTRL");
-
-            TransferConfig config = new TransferConfig();
-            config.setScenario(TransferScenario.UPLOAD_SINGLE);
-            config.setDbName("DB1");
-            config.setFilePath("/path");
-            config.setFtpName("ftp1");
-            config.setTableName("table1");
-
-            testOrchestrator.execute(command, config);
-
-            verifyNoInteractions(childCommandMonitor);
-        }
-
-        @Test
-        @DisplayName("should handle child monitor start failure gracefully")
-        void shouldHandleMonitorStartFailure() {
-            Command command = new Command();
-            command.setId(7L);
-            command.setCategoryCode("CAT");
-            command.setControlCode("CTRL");
-
-            TransferConfig config = new TransferConfig();
-            config.setScenario(TransferScenario.DOWNLOAD_MULTI_NODE);
-            config.setDbName("DB1");
-            config.setFilePath("/path");
-            config.setFtpName("ftp1");
-            config.setTableName("table1");
-
-            doThrow(new RuntimeException("Monitor error")).when(childCommandMonitor)
-                    .start(anyLong(), anyInt(), anyString());
-
-            TestOrchestrator withMonitor = new TestOrchestrator(commandRepository,
-                    resultRepository, childCommandMonitor, dbPool) {
-                @Override
-                protected void dispatch(Command command, TransferConfig config, Result result) {
-                    result.markChildrenCreated(3);
-                }
-            };
-
-            // Should not throw
-            withMonitor.execute(command, config);
         }
     }
 }

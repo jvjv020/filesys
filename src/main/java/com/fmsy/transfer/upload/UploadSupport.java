@@ -317,6 +317,27 @@ public class UploadSupport {
     // ==================== 异常文件迁移 ====================
 
     /**
+     * 将数据文件及配置的标志文件一起迁到 error 目录（自动管理 FTP 连接生命周期）。
+     *
+     * <p>委托给 {@link #moveDataAndFlagToErrorDir(FtpClient, String, TransferConfig)}，
+     * 自动借还 FTP 连接。Handler 不再需要各自实现此逻辑。</p>
+     *
+     * @param ftpName  FTP 连接名
+     * @param filePath 数据文件完整路径
+     * @param config   传输配置
+     */
+    public void moveDataAndFlagToErrorDir(String ftpName, String filePath, TransferConfig config) {
+        try {
+            transferSupport.executeWithClient(ftpName, client -> {
+                moveDataAndFlagToErrorDir(client, filePath, config);
+                return null;
+            });
+        } catch (Exception ex) {
+            log.error("Failed to move files to error dir for {}: {}", filePath, ex.getMessage());
+        }
+    }
+
+    /**
      * 将数据文件及配置的标志文件一起迁到 error 目录。
      *
      * <p>
@@ -348,6 +369,34 @@ public class UploadSupport {
     // ==================== 标志文件路径解析工具 ====================
 
     /**
+     * 从前置操作字符串中提取第一个 FLAG/READY 路径模式（不含 mode 后缀）。
+     *
+     * <p>例如 {@code "FLAG:{stem}.OK;L,READY:other.txt"} → {@code "{stem}.OK"}。
+     * 只提取路径模式字符串，不展开文件变量。需要展开时组合使用 {@link #resolveConfiguredFlagPath}。</p>
+     *
+     * @param preOps 前置操作字符串（逗号分隔）
+     * @return 第一个 FLAG/READY 路径模式；无匹配时返回 null
+     */
+    public static String extractFlagPathPattern(String preOps) {
+        if (preOps == null || preOps.isEmpty()) return null;
+        for (String op : preOps.split(",")) {
+            op = op.trim();
+            String pathPart;
+            if (op.startsWith("FLAG:")) {
+                pathPart = op.substring(5).trim();
+            } else if (op.startsWith("READY:")) {
+                pathPart = op.substring(6).trim();
+            } else {
+                continue;
+            }
+            if (pathPart.isEmpty()) continue;
+            int semicolon = pathPart.indexOf(';');
+            return semicolon > 0 ? pathPart.substring(0, semicolon).trim() : pathPart;
+        }
+        return null;
+    }
+
+    /**
      * 从传输配置的前置操作中提取标志文件的路径。
      *
      * <p>
@@ -359,37 +408,20 @@ public class UploadSupport {
      * @return 解析后的标志文件完整路径；没有 FLAG/READY 操作时返回 null
      */
     public static String resolveConfiguredFlagPath(String preOps, ResolvedPath fileInfo) {
-        if (preOps == null || preOps.isEmpty() || fileInfo == null)
-            return null;
-        for (String op : preOps.split(",")) {
-            op = op.trim();
-            String pathPart;
-            if (op.startsWith("FLAG:")) {
-                pathPart = op.substring(5).trim();
-            } else if (op.startsWith("READY:")) {
-                pathPart = op.substring(6).trim();
-            } else {
-                continue;
-            }
-            if (pathPart.isEmpty())
-                continue;
+        if (fileInfo == null) return null;
+        String pathPattern = extractFlagPathPattern(preOps);
+        if (pathPattern == null) return null;
 
-            // 去掉模式后缀（;mode 部分）
-            int semicolon = pathPart.indexOf(';');
-            String pathPattern = semicolon > 0 ? pathPart.substring(0, semicolon).trim() : pathPart;
+        // 展开文件衍生变量
+        String resolved = expandPathVariables(pathPattern, fileInfo);
 
-            // 展开文件衍生变量
-            String resolved = expandPathVariables(pathPattern, fileInfo);
-
-            // 相对路径 → 继承数据文件的目录
-            if (!resolved.startsWith("/") && fileInfo.dir() != null && !fileInfo.dir().isEmpty()) {
-                resolved = fileInfo.dir() + "/" + resolved;
-            }
-
-            // 规范化 .. 段
-            return normalizePathSlashes(resolved);
+        // 相对路径 → 继承数据文件的目录
+        if (!resolved.startsWith("/") && fileInfo.dir() != null && !fileInfo.dir().isEmpty()) {
+            resolved = fileInfo.dir() + "/" + resolved;
         }
-        return null;
+
+        // 规范化 .. 段
+        return normalizePathSlashes(resolved);
     }
 
     /**

@@ -5,6 +5,7 @@ import com.fmsy.db.JdbcTemplateWrapper;
 import com.fmsy.enums.CommandType;
 import com.fmsy.model.Command;
 import com.fmsy.util.ColumnNames;
+import com.fmsy.util.SystemConstants;
 import com.fmsy.util.TableNames;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataAccessException;
@@ -23,7 +24,7 @@ import java.util.Map;
  * <ul>
  *   <li>{@code polling/PollingService} — releaseTimeout / findTimeoutJobs / loadProcessing / findReadyCommands</li>
  *   <li>{@code lifecycle/StartupService} — findProcessingJobs(异常恢复)/ updateStatus</li>
- *   <li>{@code transfer/download/ChildCommandMonitor} — countCompletedChildren / updateMainStatus / updateMainStatusOnTimeout</li>
+ *   <li>{@code transfer/download/MergeFlowService} — 合并完成后更新主指令终态</li>
  *   <li>{@code transfer/TransferService} — findById</li>
  * </ul>
  */
@@ -305,6 +306,35 @@ public class CommandRepository {
         ColumnNames.CONTROL_CODE + ", " + ColumnNames.COMMAND_TYPE + ", " +
         ColumnNames.AUDIT_COUNT + ", " + ColumnNames.EXTRA_INFO + ", " + ColumnNames.TEMP_CONFIG +
         " FROM " + TableNames.COMMAND_TABLE + " WHERE " + ColumnNames.ID + "=?";
+
+    // ==================== 拆分完成标记(Plan B 切分) ====================
+
+    private static final String SQL_IS_SPLIT_DONE =
+        "SELECT " + ColumnNames.EXTRA_INFO + " FROM " + TableNames.COMMAND_TABLE +
+        " WHERE " + ColumnNames.ID + "=?";
+
+    private static final String SQL_MARK_SPLIT_DONE =
+        "UPDATE " + TableNames.COMMAND_TABLE + " SET " +
+        ColumnNames.EXTRA_INFO + "=CONCAT(COALESCE(" + ColumnNames.EXTRA_INFO + ",''), '|" +
+        SystemConstants.SPLIT_DONE_FLAG + "') " +
+        "WHERE " + ColumnNames.ID + "=?";
+
+    /**
+     * 检查主命令的拆分是否已完成。
+     * 通过 extra_info 是否包含 {@link SystemConstants#SPLIT_DONE_FLAG} 标记判断。
+     */
+    public boolean isSplitDone(Long mainCommandId) {
+        String extraInfo = getJdbc().queryForObject(SQL_IS_SPLIT_DONE, String.class, mainCommandId);
+        return extraInfo != null && extraInfo.contains(SystemConstants.SPLIT_DONE_FLAG);
+    }
+
+    /**
+     * 标记主命令拆分完成 — 在 extra_info 后追加 {@code |SPLIT_DONE}。
+     */
+    public void markSplitDone(Long mainCommandId) {
+        getJdbc().update(SQL_MARK_SPLIT_DONE, mainCommandId);
+        log.info("Marked split done for command: {}", mainCommandId);
+    }
 
     /**
      * 按 ID 查询命令基本信息(类别 / 控制 / 类型 / 稽核数 / 额外信息)。

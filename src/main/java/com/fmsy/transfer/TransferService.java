@@ -6,7 +6,7 @@ import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
-import com.fmsy.transfer.download.SChildCommandProcessor;
+import com.fmsy.transfer.download.ChildBucketProcessor;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.transfer.TransferOrchestrator;
 import com.fmsy.util.LogUtils;
@@ -33,7 +33,7 @@ public class TransferService {
 
     private final TransferOrchestrator transferOrchestrator;
     private final ConfigLoaderService configLoader;
-    private final SChildCommandProcessor sChildCommandProcessor;
+    private final ChildBucketProcessor childBucketProcessor;
     private final AppConfig appConfig;
     private final CommandRepository commandRepository;
     private final TempTransferConfigFactory tempConfigFactory;
@@ -84,14 +84,9 @@ public class TransferService {
             }
 
             if (Result.DIRECTION_DOWNLOAD.equals(direction) && command.getCommandType() == CommandType.COORDINATED) {
-                // S 型子命令由 SChildCommandProcessor 处理(属于 DOWNLOAD_MULTI_NODE 场景)
-                // 迭代 #17:extraInfo 格式为 "mainId|baseFilePath",需提取前半段作为主命令ID
-                String extraInfo = command.getExtraInfo();
-                String mainCommandId = extraInfo != null && extraInfo.contains("|")
-                        ? extraInfo.substring(0, extraInfo.indexOf('|'))
-                        : extraInfo;
-                sChildCommandProcessor.pollAndProcess(appConfig.getNodeId(),
-                        mainCommandId, command);
+                // S 型子命令由 ChildBucketProcessor 处理(属于 DOWNLOAD_MULTI_NODE 场景)
+                // ChildBucketProcessor 从 extraInfo 自解析主命令 ID,无需此处提取
+                childBucketProcessor.pollAndProcess(appConfig.getNodeId(), command, config);
             } else {
                 transferOrchestrator.execute(command, config);
             }

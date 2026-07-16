@@ -1,14 +1,12 @@
 package com.fmsy.transfer.upload;
 
-import com.fmsy.converter.ConverterFactory;
-import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.CommandType;
+import com.fmsy.enums.EmptyDataHandling;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.model.Command;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
-import com.fmsy.repository.DetailRepository;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.ColumnNames;
@@ -23,7 +21,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
-import java.util.*;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.IntFunction;
@@ -38,25 +36,16 @@ import static org.mockito.Mockito.*;
 class MultiUploadHandlerTest {
 
     @Mock
-    private DetailRepository detailRepository;
-
-    @Mock
     private UploadSupport uploadSupport;
 
     @Mock
     private TransferSupport transferSupport;
 
     @Mock
-    private ConverterFactory converterFactory;
-
-    @Mock
     private FieldMappingBuilder fieldMappingBuilder;
 
     @Mock
     private FtpClient ftpClient;
-
-    @Mock
-    private FileConverter fileConverter;
 
     @Mock
     private FieldMapping fieldMapping;
@@ -71,8 +60,8 @@ class MultiUploadHandlerTest {
     @BeforeEach
     void setUp() {
         batchExecutorFactory = size -> Executors.newFixedThreadPool(size);
-        handler = new MultiUploadHandler(detailRepository, uploadSupport, transferSupport,
-                converterFactory, fieldMappingBuilder, batchExecutorFactory);
+        handler = new MultiUploadHandler(uploadSupport, transferSupport,
+                fieldMappingBuilder, batchExecutorFactory);
 
         command = new Command();
         command.setId(1L);
@@ -87,68 +76,6 @@ class MultiUploadHandlerTest {
         config.setDbName("DB1");
 
         result = new Result();
-    }
-
-    // ==================== BATCH 模式 ====================
-
-    @Nested
-    @DisplayName("handle - BATCH mode")
-    class HandleBatchMode {
-
-        @BeforeEach
-        void setupBatchModeChain() {
-            command.setCommandType(CommandType.BATCH);
-        }
-
-        @Test
-        @DisplayName("多文件顺序处理，清表在前稽核后落库前调用")
-        void shouldHandleBatchWithDetails() throws Exception {
-            Map<String, Object> detail1 = new HashMap<>();
-            detail1.put(ColumnNames.DETAIL_ID, 100L);
-            detail1.put(ColumnNames.FILE_NAME, "file1.csv");
-            detail1.put(ColumnNames.FIELD_NAME, "REGION");
-            detail1.put(ColumnNames.FIELD_VALUE, "EAST");
-
-            Map<String, Object> detail2 = new HashMap<>();
-            detail2.put(ColumnNames.DETAIL_ID, 101L);
-            detail2.put(ColumnNames.FILE_NAME, "file2.csv");
-            detail2.put(ColumnNames.FIELD_NAME, "REGION");
-            detail2.put(ColumnNames.FIELD_VALUE, "WEST");
-
-            when(detailRepository.findUploadDetails(1L, ColumnNames.STATUS_EMPTY))
-                    .thenReturn(Arrays.asList(detail1, detail2));
-            when(transferSupport.resolveFilePath(anyString(), any(Map.class))).thenReturn(ResolvedPath.of("/data/files/file1.csv"));
-            doAnswer(invocation -> {
-                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
-                        return cb.run(ftpClient);
-                    }).when(transferSupport).executeWithClient(eq("ftp1"), any());
-            when(converterFactory.get("CSV")).thenReturn(fileConverter);
-            when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
-            when(uploadSupport.insertDataAndVerify(any(), any(), any(FieldMapping.class), anyString(), any())).thenReturn(100);
-
-            handler.handle(command, config, result);
-
-            assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
-            // 验证清表在前稽核后调用
-            verify(uploadSupport, never()).truncateTable(any());
-        }
-
-        @Test
-        @DisplayName("明细文件为空时应跳过")
-        void shouldSkipEmptyFileName() throws Exception {
-            Map<String, Object> detail = new HashMap<>();
-            detail.put(ColumnNames.DETAIL_ID, 200L);
-            detail.put(ColumnNames.FILE_NAME, "");
-            detail.put(ColumnNames.FIELD_NAME, "REGION");
-            detail.put(ColumnNames.FIELD_VALUE, "EAST");
-
-            when(detailRepository.findUploadDetails(1L, ColumnNames.STATUS_EMPTY))
-                    .thenReturn(Collections.singletonList(detail));
-
-            handler.handle(command, config, result);
-
-            verify(detailRepository).updateStatus(200L, ColumnNames.STATUS_SKIPPED, null);
-        }
     }
 
     // ==================== SERIAL 模式 ====================
@@ -167,7 +94,6 @@ class MultiUploadHandlerTest {
                         TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
                         return cb.run(ftpClient);
                     }).when(transferSupport).executeWithClient(eq("ftp1"), any());
-            when(converterFactory.get("CSV")).thenReturn(fileConverter);
             when(fieldMappingBuilder.buildForUpload(config, null)).thenReturn(fieldMapping);
         }
 
@@ -304,29 +230,29 @@ class MultiUploadHandlerTest {
         @Test
         @DisplayName("提取简单 FLAG 模式")
         void shouldExtractSimpleFlag() {
-            assertEquals("{stem}.OK", MultiUploadHandler.extractFlagPathPattern("FLAG:{stem}.OK"));
+            assertEquals("{stem}.OK", UploadSupport.extractFlagPathPattern("FLAG:{stem}.OK"));
         }
 
         @Test
         @DisplayName("提取带 mode 后缀的 FLAG 模式")
         void shouldExtractFlagWithMode() {
-            assertEquals("{stem}.OK", MultiUploadHandler.extractFlagPathPattern("FLAG:{stem}.OK;L"));
+            assertEquals("{stem}.OK", UploadSupport.extractFlagPathPattern("FLAG:{stem}.OK;L"));
         }
 
         @Test
         @DisplayName("多操作中提取第一个 FLAG")
         void shouldExtractFirstFlagFromMultiple() {
             String ops = "FLAG:{stem}.OK,READY:other.txt";
-            assertEquals("{stem}.OK", MultiUploadHandler.extractFlagPathPattern(ops));
+            assertEquals("{stem}.OK", UploadSupport.extractFlagPathPattern(ops));
         }
 
         @Test
         @DisplayName("无 FLAG 时返回 null")
         void shouldReturnNullWhenNoFlag() {
-            assertNotNull(MultiUploadHandler.extractFlagPathPattern("READY:check.txt"));
-            assertEquals("check.txt", MultiUploadHandler.extractFlagPathPattern("READY:check.txt"));
-            assertNull(MultiUploadHandler.extractFlagPathPattern(""));
-            assertNull(MultiUploadHandler.extractFlagPathPattern(null));
+            assertNotNull(UploadSupport.extractFlagPathPattern("READY:check.txt"));
+            assertEquals("check.txt", UploadSupport.extractFlagPathPattern("READY:check.txt"));
+            assertNull(UploadSupport.extractFlagPathPattern(""));
+            assertNull(UploadSupport.extractFlagPathPattern(null));
         }
     }
 

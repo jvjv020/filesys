@@ -31,8 +31,9 @@
 ### 下载子包（`transfer/download/`）
 | 类 | 角色 |
 |---|------|
-| `ChildCommandMonitor` | 后台线程监控 S 子命令完成情况，汇总写 TOTAL_FLAG |
-| `SChildCommandProcessor` | S 型子命令桶处理（竞争 → 下载管线 → 写结果），替代原 polling/DetailPollingService |
+| `ChildBucketProcessor` | 子节点桶处理（竞争 → 查数据 → 写临时文件 → 生成 OK 哨兵） |
+| `SplitFlowService` | 主节点分桶（Plan B 逐块切分，写入明细表） |
+| `MergeFlowService` | 主节点合流程（轮询 Y 桶 → 检查 OK 文件 → APPE 合并 → 写标志） |
 | `ParallelFileGenerator` | 按分区并行读取 DB → 临时文件 → 顺序拼接 |
 
 ### 上传子包（`transfer/upload/`）
@@ -51,7 +52,7 @@
 | `TransferUtils` | — |
 
 ## 设计要点
-- **COORDINATED(S) 类型的 DOWNLOAD_MULTI_NODE** 不由 TransferOrchestrator 处理，由 TransferService 直转 SChildCommandProcessor
+- **COORDINATED(S) 类型的 DOWNLOAD_MULTI_NODE** 不由 TransferOrchestrator 处理，由 TransferService 直转 ChildBucketProcessor
 - Handler 不持有 FTP 连接跨越 Phase 边界，各 Phase 间释放连接
 - `ParallelFileGenerator`：分区并行 → 流水线拼接，非分区表自动降级串行
 - 所有流式查询通过 `DataStream` / `CloseableIterator`，禁止 `List` 收集

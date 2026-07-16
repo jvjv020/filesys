@@ -63,5 +63,7 @@ public class AppConfig {
         private int maxPollIterations = 1000;
         /** 分区并行生成文件的线程数,默认 3 */
         private int parallelThreads = 3;
+        /** 每桶记录数(Plan B 切分时每桶包含的记录行数,默认 5000) */
+        private int bucketRecordSize = 5000;
     }
 }

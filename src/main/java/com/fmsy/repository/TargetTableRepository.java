@@ -327,6 +327,107 @@ public class TargetTableRepository {
         return values == null ? List.of() : values;
     }
 
+    // ==================== PK 范围流式查询(Plan B 分桶) ====================
+
+    /**
+     * 按 PK 范围流式查询 — 从 pkStart 到 pkEnd（不含）之间按 PK 序读取数据。
+     *
+     * <p>返回 {@link DataStream}，调用方用 try-with-resources 自动关闭。
+     *
+     * @param dbName    数据库配置名
+     * @param tableName 表名
+     * @param pkColumns 主键列名列表
+     * @param pkStart   起始 PK 值列表（null 表示从头开始）
+     * @param pkEnd     结束 PK 值列表（null 表示直到末尾）
+     */
+    public DataStream streamByPkRange(String dbName, String tableName,
+                                       List<String> pkColumns,
+                                       List<Object> pkStart, List<Object> pkEnd) {
+        List<String> predicates = new ArrayList<>();
+        List<Object> params = new ArrayList<>();
+        String orderByClause = String.join(", ", pkColumns);
+
+        if (pkStart != null && !pkStart.isEmpty()) {
+            // 使用行值语法: (pk1, pk2, ...) >= (?, ?, ...)
+            StringBuilder tuple = new StringBuilder("(");
+            tuple.append(String.join(", ", pkColumns));
+            tuple.append(") >= (");
+            for (int i = 0; i < pkStart.size(); i++) {
+                if (i > 0) tuple.append(", ");
+                tuple.append("?");
+            }
+            tuple.append(")");
+            predicates.add(tuple.toString());
+            params.addAll(pkStart);
+        }
+        if (pkEnd != null && !pkEnd.isEmpty()) {
+            StringBuilder tuple = new StringBuilder("(");
+            tuple.append(String.join(", ", pkColumns));
+            tuple.append(") < (");
+            for (int i = 0; i < pkEnd.size(); i++) {
+                if (i > 0) tuple.append(", ");
+                tuple.append("?");
+            }
+            tuple.append(")");
+            predicates.add(tuple.toString());
+            params.addAll(pkEnd);
+        }
+
+        SqlStatement stmt = SqlBuilder.buildSelectParametric(
+                tableName, List.of(), false, predicates, params,
+                List.of(orderByClause.split(", ")), null, null);
+        return new StreamingQuery(getDataSource(dbName), stmt,
+                SystemConstants.DEFAULT_BATCH_SIZE, tableName);
+    }
+
+    /**
+     * 查询 PK 边界 — 返回 pkStart 之后第 offset 行的完整记录。
+     *
+     * <p>用于 Plan B 切分:逐块跳过 offset 行找到桶的结束边界。
+     *
+     * @param dbName      数据库配置名
+     * @param tableName   表名
+     * @param pkColumns   主键列名列表
+     * @param afterPk     起始 PK 值列表（null 从首行开始）
+     * @param offset      跳过行数
+     * @param extraWhere  额外 WHERE 条件（可为 null）
+     * @param extraParams 额外 WHERE 参数（可为 null）
+     * @return 边界行的完整记录；无更多行时返回 null
+     */
+    public Map<String, Object> queryNextPkBoundary(String dbName, String tableName,
+                                                    List<String> pkColumns,
+                                                    List<Object> afterPk, int offset,
+                                                    String extraWhere, List<Object> extraParams) {
+        List<String> predicates = new ArrayList<>();
+        List<Object> params = new ArrayList<>();
+        String orderByClause = String.join(", ", pkColumns);
+
+        if (afterPk != null && !afterPk.isEmpty()) {
+            StringBuilder tuple = new StringBuilder("(");
+            tuple.append(String.join(", ", pkColumns));
+            tuple.append(") >= (");
+            for (int i = 0; i < afterPk.size(); i++) {
+                if (i > 0) tuple.append(", ");
+                tuple.append("?");
+            }
+            tuple.append(")");
+            predicates.add(tuple.toString());
+            params.addAll(afterPk);
+        }
+        if (extraWhere != null && !extraWhere.isEmpty()) {
+            predicates.add(extraWhere);
+            if (extraParams != null) {
+                params.addAll(extraParams);
+            }
+        }
+
+        SqlStatement stmt = SqlBuilder.buildSelectParametric(
+                tableName, List.of(), false, predicates, params,
+                List.of(orderByClause.split(", ")), 1, offset > 0 ? offset : 0);
+        List<Map<String, Object>> rows = getJdbc(dbName).queryForList(stmt);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
     /**
      * 数据流接口 — 统一 {@link StreamingQuery} 和 {@link PartitionSequentialIterator} 的返回类型。
      *

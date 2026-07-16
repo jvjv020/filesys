@@ -23,6 +23,8 @@ public final class ColumnNames {
     public static final String FIELD_NAME = "指定字段名称";
     public static final String FIELD_VALUE = "指定字段取值";
     public static final String FILE_NAME = "指定文件名";
+    /** 桶规格名,格式 "分区名|pkStart|pkEnd"（仅 DOWNLOAD_MULTI_NODE Plan B 切分使用） */
+    public static final String SPEC_NAME = "桶规格名";
 
     // 结果表
     public static final String COMMAND_ID = "指令ID";

@@ -20,9 +20,9 @@
 - `commandType` 用 `CommandType` 枚举，DB 存 code
 
 ### `Result`
-- 14 个持久化字段 + 4 个瞬态字段（`dbName` / `startTimeMs` / `suppressStatusUpdate` / `expectedChildren` / `needsChildMonitor`）
+- 14 个持久化字段 + 3 个瞬态字段（`dbName` / `startTimeMs` / `suppressStatusUpdate`）
 - **使用 `Result.builder()` fluent API 构造**，替代 14 行 setter 链
-- `markChildrenCreated(count)` — MultiNode 成功时调用
+- `markChildrenCreated()` — MultiNode 成功时调用（抑制指令表终态落库）
 - `markChildrenFailed(reason)` — MultiNode 失败时调用
 - `suppressStatusUpdate = true` 时 Orchestrator 跳过更新指令表
 

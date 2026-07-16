@@ -8,7 +8,6 @@ import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.ResultRepository;
-import com.fmsy.transfer.download.ChildCommandMonitor;
 import com.fmsy.transfer.download.MultiNodeDownloadHandler;
 import com.fmsy.transfer.download.SingleDownloadHandler;
 import com.fmsy.transfer.download.SingleNodeDownloadHandler;
@@ -52,9 +51,6 @@ class TransferOrchestratorTest {
     private ResultRepository resultRepository;
 
     @Mock
-    private ChildCommandMonitor childCommandMonitor;
-
-    @Mock
     private DataSourceConfig.DbPool dbPool;
 
     @Mock
@@ -66,7 +62,7 @@ class TransferOrchestratorTest {
     void setUp() {
         orchestrator = new TransferOrchestrator(singleUpload, multiUpload,
                 singleDownload, singleNodeDownload, multiNodeDownload,
-                commandRepository, resultRepository, childCommandMonitor, dbPool);
+                commandRepository, resultRepository, dbPool);
         when(dbPool.getTransactionTemplate(any())).thenReturn(transactionTemplate);
         when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
             var callback = invocation.getArgument(0,
@@ -100,8 +96,8 @@ class TransferOrchestratorTest {
     class DispatchUploadMulti {
 
         @Test
-        @DisplayName("should route to MultiUploadHandler")
-        void shouldRouteToMultiUploadHandler() throws Exception {
+        @DisplayName("BATCH 应路由到 SingleUploadHandler")
+        void shouldRouteBatchToSingleUploadHandler() throws Exception {
             Command command = new Command();
             command.setId(2L);
             command.setCommandType(CommandType.BATCH);
@@ -111,7 +107,24 @@ class TransferOrchestratorTest {
 
             orchestrator.execute(command, config);
 
+            verify(singleUpload).handle(eq(command), eq(config), any(Result.class));
+            verify(multiUpload, never()).handle(any(), any(), any());
+        }
+
+        @Test
+        @DisplayName("SERIAL 应路由到 MultiUploadHandler")
+        void shouldRouteSerialToMultiUploadHandler() throws Exception {
+            Command command = new Command();
+            command.setId(3L);
+            command.setCommandType(CommandType.SERIAL);
+
+            TransferConfig config = new TransferConfig();
+            config.setScenario(TransferScenario.UPLOAD_MULTI);
+
+            orchestrator.execute(command, config);
+
             verify(multiUpload).handle(eq(command), eq(config), any(Result.class));
+            verify(singleUpload, never()).handle(any(), any(), any());
         }
     }
 

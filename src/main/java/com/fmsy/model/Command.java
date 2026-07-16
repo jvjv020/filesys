@@ -40,7 +40,7 @@ public class Command {
 
     /**
      * 若 startTime 尚未设置,填充为当前时间(用于结果表写真正的处理起始时间)。
-     * 与 {@code transfer.TransferService.process} 与 {@code transfer.download.SChildCommandProcessor.pollAndProcess} 协作:
+     * 与 {@code transfer.TransferService.process} 与 {@code transfer.download.ChildBucketProcessor.pollAndProcess} 协作:
      * 业务方在派发成功后、ResultBuilder 构造前调用,保证 startTime 与"竞争成功时刻"对齐。
      */
     public void markStartTimeIfAbsent() {

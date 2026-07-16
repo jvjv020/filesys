@@ -38,20 +38,10 @@ import java.time.LocalDateTime;
  * }
  * </pre>
  *
- * <p>对需要一次性填齐 14 列持久化字段的场景(典型如 transfer/download/SChildCommandProcessor 直接写结果行),
- * 可用 {@link #builder()} 走 fluent API 构造:
- * <pre>
- * Result result = Result.builder()
- *     .commandId(subCommand.getId())
- *     .categoryCode(subCommand.getCategoryCode())
- *     ...
- *     .build();
- * </pre>
- *
  * <p>Handler 在分支处调用(运行时修改状态,不是构造期):
  * <ul>
  *   <li>{@link #setOutcome(int, String, String)} — 直接设记录数/状态/描述</li>
- *   <li>{@link #markChildrenCreated(int)} / {@link #markChildrenFailed(String)} — MultiNode 语义</li>
+ *   <li>{@link #markChildrenCreated()} / {@link #markChildrenFailed(String)} — MultiNode 语义</li>
  *   <li>{@link #failWith(Exception)} — Orchestrator 捕获到异常时</li>
  * </ul>
  *
@@ -94,26 +84,26 @@ public class Result {
     private transient long startTimeMs;
 
     /**
-     * MultiNode Download 成功时设为 true:Orchestrator 跳过更新指令表,等 monitor 收尾。
+     * MultiNode Download 成功时设为 true:Orchestrator 跳过更新指令表和结果表,
+     * 由异步的 MergeFlowService 在合并完成后统一更新终态。
      * 非结果表字段,仅 Orchestrator 内部使用。
      */
     @Setter(AccessLevel.NONE)
     private transient boolean suppressStatusUpdate;
 
     /**
-     * MultiNode Download 子命令创建数,Orchestrator 据此启停 ChildCommandMonitor。
-     * 与 {@link #needsChildMonitor} 配合使用。
-     */
-    @Setter(AccessLevel.NONE)
-    private transient int expectedChildren;
-
-    /**
-     * MultiNode Download 成功创建子命令时设为 true:Orchestrator 走完 finalize 后
-     * 自动调 {@code ChildCommandMonitor.start(...)} 启动后台监控线程。
-     * 非结果表字段,仅 Orchestrator 内部使用。
+     * MultiNode 子命令监控需要 — markChildrenCreated 时设为 true，
+     * 表示需要启动异步的 ChildCommandMonitor 监控子命令完成。
      */
     @Setter(AccessLevel.NONE)
     private transient boolean needsChildMonitor;
+
+    /**
+     * 期望的子命令数量 — MultiNode 创建子命令时记录，
+     * 供 ChildCommandMonitor 判断所有子命令是否已完成。
+     */
+    @Setter(AccessLevel.NONE)
+    private transient int expectedChildren;
 
     // ==================== 生命周期方法(本类自洽,不依赖外部包) ====================
 
@@ -134,15 +124,24 @@ public class Result {
     }
 
     /**
-     * MultiNode Download 成功:子命令已创建,主命令保持 PROCESSING 等待 monitor 收尾。
-     * Orchestrator 据此跳过 updateStatus,并在 finalize 之后调
-     * {@code ChildCommandMonitor.start(commandId, expectedChildren)} 启动后台监控。
+     * MultiNode Download 成功:子命令已创建,主命令保持 PROCESSING。
+     * Orchestrator 据此跳过指令表终态落库,由异步的 MergeFlowService
+     * 在分桶合并完成后统一更新终态。
      */
-    public void markChildrenCreated(int expectedChildren) {
+    public void markChildrenCreated() {
         this.result = ColumnNames.STATUS_PROCESSING;
         this.suppressStatusUpdate = true;
-        this.expectedChildren = expectedChildren;
         this.needsChildMonitor = true;
+    }
+
+    /**
+     * MultiNode Download 成功重载 — 同时记录期望的子命令数。
+     *
+     * @param expectedChildren 期望的子命令数,供 ChildCommandMonitor 判断完成条件
+     */
+    public void markChildrenCreated(int expectedChildren) {
+        markChildrenCreated();
+        this.expectedChildren = expectedChildren;
     }
 
     /**
@@ -187,7 +186,7 @@ public class Result {
 
     /**
      * 创建 Result Builder — 适用于不经过 Orchestrator 编排、直接组装结果行的场景
-     * (典型如 {@code transfer/download/SChildCommandProcessor} 在子命令结束时写结果行)。
+     * (典型如 ChildBucketProcessor 在桶处理结束时写结果行)。
      *
      * <p>对应 14 列持久化字段 + dbName 路由字段。每个 setter 返回 {@code this},支持链式调用。
      * 运行时方法(markStart / setOutcome / markEnd / failWith 等)不在 Builder 中,
