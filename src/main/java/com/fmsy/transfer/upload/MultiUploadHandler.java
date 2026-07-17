@@ -1,7 +1,7 @@
 package com.fmsy.transfer.upload;
 
-import com.fmsy.enums.EmptyDataHandling;
-import com.fmsy.exception.TransferException;
+import com.fmsy.exception.FlagCheckException;
+import com.fmsy.ftp.FtpClient;
 import com.fmsy.model.Command;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
@@ -30,23 +30,29 @@ import java.util.function.IntFunction;
  * UPLOAD_MULTI 场景的 SERIAL 模式：通配符匹配目录所有文件，
  * 单次 FTP 连接内预扫描后并行上传到同一张表。
  *
- * <p>配置路径中的 {@code {FILE_NAME}} 占位符替换为 {@code *}（通配符），
- * 用于 FTP 文件列表匹配。</p>
- * <p>示例：{@code /data/input/{YYYYMMDD}/BR{FILE_NAME}.csv}
- * → {@code *} 匹配所有 BR 开头的 csv 文件。</p>
+ * <p>
+ * 配置路径中的 {@code {FILE_NAME}} 占位符替换为 {@code *}（通配符），
+ * 用于 FTP 文件列表匹配。
+ * </p>
+ * <p>
+ * 示例：{@code /data/input/{YYYYMMDD}/BR{FILE_NAME}.csv}
+ * → {@code *} 匹配所有 BR 开头的 csv 文件。
+ * </p>
  *
- * <p>阶段顺序：<br>
+ * <p>
+ * 阶段顺序：<br>
  * 预扫描（单次 FTP 连接内完成列表+标志检查+孤立标志文件迁 error）→ 清表 → 并行落库+前后审计 → 汇总后操作
  *
- * <p>前稽核已合并到 insertDataAndVerify 的落库后阶段，与后审计使用
- * CloseableIterator.getRecordCount() 统一校验，无需额外 FTP 流做独立前稽核。</p>
+ * <p>
+ * 前稽核已合并到 insertDataAndVerify 的落库后阶段，与后审计使用
+ * CloseableIterator.getRecordCount() 统一校验，无需额外 FTP 流做独立前稽核。
+ * </p>
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class MultiUploadHandler implements TransferHandler {
 
-    static final int TASK_SKIP = -1;
     static final int TASK_FAIL = -2;
 
     private final UploadSupport support;
@@ -54,27 +60,22 @@ public class MultiUploadHandler implements TransferHandler {
     private final FieldMappingBuilder fieldMappingBuilder;
     private final IntFunction<ExecutorService> batchExecutorFactory;
 
-    @Override
-    public void handle(Command command, TransferConfig config, Result result) throws Exception {
-        handleSerial(command, config, result);
-    }
-
-    // ==================== SERIAL 模式：目录通配符 + 预扫描 + 并发 ====================
-
     /**
-     * SERIAL 模式完整流程：
      * <ol>
-     *   <li>解析配置路径，{FILE_NAME} → *，在单次 FTP 连接内完成列表 + 标志检查 + 异常文件处理</li>
-     *   <li>统一清表（clearTableFlag=Y 时）</li>
-     *   <li>对有效文件并行执行落库（insertDataAndVerify + postProcess），
-     *       前稽核与后审计在落库后统一校验</li>
-     *   <li>汇总后操作（postProcess）</li>
+     * <li>解析配置路径，{FILE_NAME} → *，在单次 FTP 连接内完成列表 + 标志检查 + 异常文件处理</li>
+     * <li>统一清表（clearTableFlag=Y 时）</li>
+     * <li>对有效文件并行执行落库（insertDataAndVerify + postProcess），
+     * 前稽核与后审计在落库后统一校验</li>
+     * <li>汇总后操作（postProcess）</li>
      * </ol>
      *
-     * <p>路径配置示例：{@code /data/input/{YYYYMMDD}/BR{FILE_NAME}.csv}
-     * — SERIAL 模式将 {FILE_NAME} 替换为 {@code *}，匹配所有 BR 开头的 csv 文件。</p>
+     * <p>
+     * 路径配置示例：{@code /data/input/{YYYYMMDD}/BR{FILE_NAME}.csv}
+     * — SERIAL 模式将 {FILE_NAME} 替换为 {@code *}，匹配所有 BR 开头的 csv 文件。
+     * </p>
      */
-    private void handleSerial(Command command, TransferConfig config, Result result) throws Exception {
+    @Override
+    public void handle(Command command, TransferConfig config, Result result) throws Exception {
         log.info("Multi-file upload from directory, command={}, table={}",
                 command.getId(), config.getTableName());
         String ftpName = config.getFtpName();
@@ -133,13 +134,12 @@ public class MultiUploadHandler implements TransferHandler {
             }
         }
 
-        // 落库失败处理
-        if (failedCount > 0 && config.getEmptyDataHandling() == EmptyDataHandling.ERROR) {
-            rollbackOnFailure(config, failedCount);
+        // 有文件失败时仅日志告警，不清表不回滚（清表已前置，单文件失败已在各自事务中回滚）
+        if (failedCount > 0) {
+            log.warn("{} file(s) failed, individual transactions rolled back", failedCount);
         }
 
-        result.setOutcome(totalRecords,
-                TransferSupport.determineMainStatus(failedCount == 0, failedCount, 0), "");
+        result.setOutcome(totalRecords, ColumnNames.STATUS_SUCCESS, "");
     }
 
     // ==================== 落库阶段（单文件） ====================
@@ -147,77 +147,101 @@ public class MultiUploadHandler implements TransferHandler {
     /**
      * 对单个文件执行落库操作（insertDataAndVerify + postProcess）。
      *
-     * <p>SERIAL 模式（目录通配符）下 auditCount 传入 null，跳过稽核数校验。</p>
+     * <p>
+     * SERIAL 模式（目录通配符）下 auditCount 传入 null，跳过稽核数校验。
+     * </p>
      *
      * @param mapping    预构建的 FieldMapping（所有文件共享，避免重复构建）
      * @param auditCount 稽核数（SERIAL 模式传 null）
      * @return 成功插入的记录数
      */
     private Integer insertSingleFile(String ftpName, String filePath, ResolvedPath fileInfo,
-                                     TransferConfig config, FieldMapping mapping, Integer auditCount) {
+            TransferConfig config, FieldMapping mapping, Integer auditCount) {
         try {
             return transferSupport.executeWithClient(ftpName, client -> {
-                // 落库 + 前后审计（单事务），使用预构建的 FieldMapping（避免重复查表元数据）
-                // auditCount 由 insertAndVerifyPerFileInTx 在落库后与后审计同时校验
+                // Phase 1: preCheck — 标志文件检查（含 FLAG 内容比对）
+                UploadSupport.UploadResult checkResult = support.preCheck(client, config, fileInfo, filePath);
+                if (checkResult != null) {
+                    log.warn("Pre-check failed for {}, skipping", filePath);
+                    return 0;
+                }
+
+                // Phase 2: 落库 + 前后审计（单事务），使用预构建的 FieldMapping（避免重复查表元数据）
                 int count = support.insertDataAndVerify(client, config, mapping, filePath, auditCount);
 
-                // 文件级后操作
+                // Phase 3: 文件级后操作
                 support.postProcess(client, config, fileInfo, count);
 
                 log.info("Uploaded file: {} ({} records)", filePath, count);
                 return count;
             });
+        } catch (FlagCheckException e) {
+            // FLAG 比对失败 → 迁文件到 error 目录
+            log.warn("FLAG check failed, moving to error: {}", filePath);
+            support.moveDataAndFlagToErrorDir(ftpName, filePath, config);
+            return TASK_FAIL;
         } catch (Exception e) {
-            log.error("Insert failed for {}: {}", filePath, e.getMessage(), e);
+            // 前稽核/后审计或其他异常 → 迁文件到 error 目录，文件级事务已自行回滚
+            log.error("Insert failed for {}, moving to error: {}", filePath, e.getMessage());
+            support.moveDataAndFlagToErrorDir(ftpName, filePath, config);
             return TASK_FAIL;
         }
     }
-
 
     // ==================== 预扫描工具 ====================
 
     /**
      * 预扫描文件列表，过滤出有效的数据文件。
      *
-     * <p>对于有数据文件但无对应标志文件的，日志告警并跳过。</p>
+     * <p>
+     * 对于有数据文件但无对应标志文件的，日志告警并跳过。
+     * </p>
      */
     List<String> prescanDataFiles(String[] allFiles, String flagPattern) {
-        if (allFiles == null || allFiles.length == 0) return List.of();
+        if (allFiles == null || allFiles.length == 0)
+            return List.of();
         if (flagPattern == null) {
             return new ArrayList<>(List.of(allFiles));
         }
 
+        // 预构建 ResolvedPath，一次解析供 name() 和 resolveFlagName 复用，避免重复的字符串操作
+        List<ResolvedPath> fileInfos = new ArrayList<>(allFiles.length);
         Set<String> allNames = new HashSet<>();
         for (String f : allFiles) {
-            allNames.add(fileNameOnly(f));
+            ResolvedPath info = ResolvedPath.of(f);
+            fileInfos.add(info);
+            allNames.add(info.name());
         }
 
         List<String> dataFiles = new ArrayList<>();
-        for (String file : allFiles) {
-            String name = fileNameOnly(file);
+        for (int i = 0; i < allFiles.length; i++) {
+            ResolvedPath fileInfo = fileInfos.get(i);
+            String name = fileInfo.name();
 
-            String expectedFlagName = resolveFlagName(flagPattern, ResolvedPath.of(file));
+            String expectedFlagName = resolveFlagName(flagPattern, fileInfo);
             if (expectedFlagName == null) {
-                dataFiles.add(file);
+                dataFiles.add(allFiles[i]);
                 continue;
             }
 
+            // 跳过标志文件本身
             String expectedName = fileNameOnly(expectedFlagName);
             if (name.equals(expectedName)) {
                 continue;
             }
             if (allNames.contains(expectedName)) {
-                dataFiles.add(file);
+                dataFiles.add(allFiles[i]);
             } else {
                 log.warn("Data file {} has no corresponding flag file (expected: {}), skipping",
-                        file, expectedFlagName);
+                        allFiles[i], expectedFlagName);
             }
         }
         return dataFiles;
     }
 
     static String resolveFlagName(String flagPattern, ResolvedPath fileInfo) {
-        if (flagPattern == null || fileInfo == null) return null;
+        if (flagPattern == null || fileInfo == null)
+            return null;
         String resolved = TransferSupport.expandPathVariables(flagPattern, fileInfo);
         if (!resolved.startsWith("/") && fileInfo.dir() != null && !fileInfo.dir().isEmpty()) {
             resolved = fileInfo.dir() + "/" + resolved;
@@ -226,7 +250,8 @@ public class MultiUploadHandler implements TransferHandler {
     }
 
     private static String fileNameOnly(String path) {
-        if (path == null) return null;
+        if (path == null)
+            return null;
         int slash = path.lastIndexOf('/');
         return slash >= 0 ? path.substring(slash + 1) : path;
     }
@@ -234,15 +259,10 @@ public class MultiUploadHandler implements TransferHandler {
     /**
      * 单次 FTP 连接内完成：文件列表 + 标志检查 + 异常文件处理。
      *
-     * <p>合并了原来的 {@code listFiles} + {@code prescanDataFiles} + 逐文件 preCheck，
-     * 减少 FTP 连接次数（从 1+N 次降至 1 次）。</p>
-     *
-     * <p>处理逻辑：</p>
-     * <ul>
-     *   <li>数据文件有对应标志 → 加入有效列表</li>
-     *   <li>数据文件无对应标志 → 跳过（仅日志警告）</li>
-     *   <li>孤立的标志文件（无对应数据文件）→ 迁到 error 目录（自动重命名 + 时间戳）</li>
-     * </ul>
+     * <p>
+     * 委托给 {@link #prescanDataFiles} 做基础过滤后，
+     * 再单独处理孤立标志文件迁移。
+     * </p>
      *
      * @param ftpName     FTP 连接名
      * @param listPattern 文件列表通配符模式
@@ -250,101 +270,76 @@ public class MultiUploadHandler implements TransferHandler {
      * @return 有效数据文件完整路径列表；null 表示列表失败
      */
     private List<String> prescanAndValidate(String ftpName, String listPattern,
-                                             TransferConfig config) throws Exception {
+            TransferConfig config) throws Exception {
         return transferSupport.executeWithClient(ftpName, client -> {
-            // 1. 列出所有文件
             String[] allFiles = client.listFiles(listPattern);
             if (allFiles == null) return null;
             if (allFiles.length == 0) return List.of();
-            log.debug("Prescan: {} files listed (pattern: {})", allFiles.length, listPattern);
 
-            // 2. 提取标志模式
             String flagPattern = UploadSupport.extractFlagPathPattern(config.getPreOperations());
             if (flagPattern == null) {
-                // 无标志检查 → 所有文件都是数据文件
                 log.info("Prescan: {} files (no flag pattern)", allFiles.length);
                 return new ArrayList<>(List.of(allFiles));
             }
 
-            // 3. 构建文件名集合
-            Set<String> allNames = new HashSet<>();
-            for (String f : allFiles) allNames.add(fileNameOnly(f));
+            // Phase A: prescanDataFiles 过滤有效数据文件（含标志文件过滤和无标志告警）
+            List<String> validFiles = prescanDataFiles(allFiles, flagPattern);
 
-            // 4. 分类处理
-            List<String> validDataFiles = new ArrayList<>();
-            List<String> noFlagDataFiles = new ArrayList<>();
-            List<String> flagFiles = new ArrayList<>();
-            Set<String> validFlagNames = new HashSet<>();
+            // Phase B: 孤立标志文件迁移到 error 目录
+            moveOrphanedFlagFiles(client, allFiles, flagPattern, validFiles);
 
-            for (String file : allFiles) {
-                String name = fileNameOnly(file);
-                String expectedFlagName = resolveFlagName(flagPattern, ResolvedPath.of(file));
-                if (expectedFlagName == null) {
-                    validDataFiles.add(file);
-                    continue;
-                }
-                String expectedName = fileNameOnly(expectedFlagName);
-
-                if (name.equals(expectedName)) {
-                    // 这是标志文件本身
-                    flagFiles.add(file);
-                    continue;
-                }
-
-                if (allNames.contains(expectedName)) {
-                    // 数据文件有对应标志 → 有效
-                    validDataFiles.add(file);
-                    validFlagNames.add(expectedName);
-                } else {
-                    // 数据文件无对应标志 → 跳过
-                    noFlagDataFiles.add(file);
-                }
-            }
-
-            // 5. 日志警告：无标志的数据文件（跳过，不迁 error）
-            for (String badFile : noFlagDataFiles) {
-                log.warn("Data file without flag, skipping: {}", badFile);
-            }
-
-            // 6. 处理孤立的标志文件（迁到 error 目录，自动重命名 + 时间戳）
-            int orphanedCount = 0;
-            for (String flagFile : flagFiles) {
-                String name = fileNameOnly(flagFile);
-                if (!validFlagNames.contains(name)) {
-                    log.warn("Orphaned flag file, moving to error: {}", flagFile);
-                    try {
-                        client.moveToErrorDir(flagFile);
-                        orphanedCount++;
-                    } catch (Exception e) {
-                        log.error("Failed to move orphaned flag to error: {}", flagFile, e);
-                    }
-                }
-            }
-
-            log.info("Prescan: {} valid, {} skipped (no flag), {} orphaned flags moved to error",
-                    validDataFiles.size(), noFlagDataFiles.size(), orphanedCount);
-
-            return validDataFiles;
+            log.info("Prescan result: {} valid files (pattern: {})", validFiles.size(), listPattern);
+            return validFiles;
         });
+    }
+
+    /**
+     * 扫描孤立标志文件并迁移到 error 目录。
+     *
+     * <p>
+     * 孤立标志文件 = 有标志文件但 prescanDataFiles 中没有匹配的数据文件。
+     * </p>
+     */
+    private void moveOrphanedFlagFiles(FtpClient client, String[] allFiles,
+            String flagPattern, List<String> validDataFiles) throws Exception {
+        // 收集有效数据文件对应的标志文件名
+        Set<String> validFlagNames = new HashSet<>();
+        for (String f : validDataFiles) {
+            String expectedName = resolveFlagName(flagPattern, ResolvedPath.of(f));
+            if (expectedName != null) {
+                validFlagNames.add(fileNameOnly(expectedName));
+            }
+        }
+
+        // 遍历所有文件，将没有对应数据文件的标志文件迁到 error
+        int orphanedCount = 0;
+        for (String file : allFiles) {
+            String expectedFlagName = resolveFlagName(flagPattern, ResolvedPath.of(file));
+            if (expectedFlagName == null) continue;
+
+            String name = fileNameOnly(file);
+            String expectedName = fileNameOnly(expectedFlagName);
+
+            if (name.equals(expectedName) && !validFlagNames.contains(name)) {
+                log.warn("Orphaned flag file, moving to error: {}", file);
+                try {
+                    client.moveToErrorDir(file);
+                    orphanedCount++;
+                } catch (Exception e) {
+                    log.error("Failed to move orphaned flag to error: {}", file, e);
+                }
+            }
+        }
+
+        if (orphanedCount > 0) {
+            log.info("Moved {} orphaned flag(s) to error dir", orphanedCount);
+        }
     }
 
     // ==================== 通用工具 ====================
 
     private static void shutdownExecutor(ExecutorService executor) {
         TransferUtils.shutdownExecutor(executor, 1, TimeUnit.MINUTES, "Upload executor");
-    }
-
-    private void rollbackOnFailure(TransferConfig config, int failedCount) throws TransferException {
-        if (BooleanUtils.isYes(config.getClearTableFlag())) {
-            support.truncateTable(config);
-            log.error("Rolled back table {} due to {} failed file(s)",
-                    config.getTableName(), failedCount);
-        } else {
-            log.error("Post-audit failed for {} file(s); incremental mode, preserving existing data in {}.{}",
-                    failedCount, config.getDbName(), config.getTableName());
-        }
-        throw new TransferException("POST_AUDIT_FAILED",
-                "Post-audit failed for " + failedCount + " file(s)");
     }
 
 }

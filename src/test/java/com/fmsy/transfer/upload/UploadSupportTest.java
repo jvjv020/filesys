@@ -7,7 +7,6 @@ import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.EmptyDataHandling;
 import com.fmsy.exception.FlagCheckException;
 import com.fmsy.ftp.FtpClient;
-import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.TargetTableRepository;
@@ -35,9 +34,6 @@ import static org.mockito.Mockito.*;
 @ExtendWith(MockitoExtension.class)
 @DisplayName("UploadSupport Tests")
 class UploadSupportTest {
-
-    @Mock
-    private FtpPool ftpPool;
 
     @Mock
     private TargetTableRepository targetTableRepository;
@@ -70,7 +66,7 @@ class UploadSupportTest {
 
     @BeforeEach
     void setUp() {
-        uploadSupport = new UploadSupport(ftpPool, targetTableRepository, dbPool, transferSupport, converterFactory, fieldMappingBuilder);
+        uploadSupport = new UploadSupport(targetTableRepository, dbPool, transferSupport, converterFactory, fieldMappingBuilder);
     }
 
     @Nested

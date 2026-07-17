@@ -4,7 +4,6 @@ import com.fmsy.config.DataSourceConfig;
 import com.fmsy.converter.CloseableIterator;
 import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
-import com.fmsy.enums.EmptyDataHandling;
 import com.fmsy.exception.FlagCheckException;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.ftp.FtpPool;
@@ -55,7 +54,6 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class UploadSupport {
 
-    private final FtpPool ftpPool;
     private final TargetTableRepository targetTableRepository;
     private final DataSourceConfig.DbPool dbPool;
     private final TransferSupport transferSupport;
@@ -319,8 +317,10 @@ public class UploadSupport {
     /**
      * 将数据文件及配置的标志文件一起迁到 error 目录（自动管理 FTP 连接生命周期）。
      *
-     * <p>委托给 {@link #moveDataAndFlagToErrorDir(FtpClient, String, TransferConfig)}，
-     * 自动借还 FTP 连接。Handler 不再需要各自实现此逻辑。</p>
+     * <p>
+     * 委托给 {@link #moveDataAndFlagToErrorDir(FtpClient, String, TransferConfig)}，
+     * 自动借还 FTP 连接。Handler 不再需要各自实现此逻辑。
+     * </p>
      *
      * @param ftpName  FTP 连接名
      * @param filePath 数据文件完整路径
@@ -371,14 +371,17 @@ public class UploadSupport {
     /**
      * 从前置操作字符串中提取第一个 FLAG/READY 路径模式（不含 mode 后缀）。
      *
-     * <p>例如 {@code "FLAG:{stem}.OK;L,READY:other.txt"} → {@code "{stem}.OK"}。
-     * 只提取路径模式字符串，不展开文件变量。需要展开时组合使用 {@link #resolveConfiguredFlagPath}。</p>
+     * <p>
+     * 例如 {@code "FLAG:{stem}.OK;L,READY:other.txt"} → {@code "{stem}.OK"}。
+     * 只提取路径模式字符串，不展开文件变量。需要展开时组合使用 {@link #resolveConfiguredFlagPath}。
+     * </p>
      *
      * @param preOps 前置操作字符串（逗号分隔）
      * @return 第一个 FLAG/READY 路径模式；无匹配时返回 null
      */
     public static String extractFlagPathPattern(String preOps) {
-        if (preOps == null || preOps.isEmpty()) return null;
+        if (preOps == null || preOps.isEmpty())
+            return null;
         for (String op : preOps.split(",")) {
             op = op.trim();
             String pathPart;
@@ -389,7 +392,8 @@ public class UploadSupport {
             } else {
                 continue;
             }
-            if (pathPart.isEmpty()) continue;
+            if (pathPart.isEmpty())
+                continue;
             int semicolon = pathPart.indexOf(';');
             return semicolon > 0 ? pathPart.substring(0, semicolon).trim() : pathPart;
         }
@@ -408,9 +412,11 @@ public class UploadSupport {
      * @return 解析后的标志文件完整路径；没有 FLAG/READY 操作时返回 null
      */
     public static String resolveConfiguredFlagPath(String preOps, ResolvedPath fileInfo) {
-        if (fileInfo == null) return null;
+        if (fileInfo == null)
+            return null;
         String pathPattern = extractFlagPathPattern(preOps);
-        if (pathPattern == null) return null;
+        if (pathPattern == null)
+            return null;
 
         // 展开文件衍生变量
         String resolved = expandPathVariables(pathPattern, fileInfo);

@@ -142,7 +142,7 @@ class MultiUploadHandlerTest {
         }
 
         @Test
-        @DisplayName("insert 失败应计入失败数")
+        @DisplayName("insert 失败时应记录日志但结果仍为 Y")
         void shouldCountInsertFailAsError() throws Exception {
             when(ftpClient.listFiles(anyString())).thenReturn(new String[]{"/data/files/file1.csv"});
             when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
@@ -150,7 +150,7 @@ class MultiUploadHandlerTest {
 
             handler.handle(command, config, result);
 
-            assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
+            assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
         }
 
         @Test

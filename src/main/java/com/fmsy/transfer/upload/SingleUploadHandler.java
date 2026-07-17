@@ -22,18 +22,21 @@ import java.util.Map;
 /**
  * 单文件上传 Handler — 处理 UPLOAD_SINGLE（SERIAL）和 UPLOAD_MULTI（BATCH）两种场景。
  *
- * <p>两种场景共享相同的上传管线：<br>
+ * <p>
+ * 两种场景共享相同的上传管线：<br>
  * preCheck → truncateTable → insertDataAndVerify → postProcess
  *
- * <p>区别仅在于文件路径解析方式：
+ * <p>
+ * 区别仅在于文件路径解析方式：
  * <ul>
- *   <li><b>SERIAL（UPLOAD_SINGLE）</b>：从配置路径直接解析</li>
- *   <li><b>BATCH（UPLOAD_MULTI + BATCH）</b>：从明细表取 {@code FILE_NAME} 替换路径中的
- *       {@code {FILE_NAME}} 占位符；明细的 {@code FIELD_NAME/FIELD_VALUE} 作为
- *       extraFields 传入 FieldMapping</li>
+ * <li><b>SERIAL（UPLOAD_SINGLE）</b>：从配置路径直接解析</li>
+ * <li><b>BATCH（UPLOAD_MULTI + BATCH）</b>：从明细表取 {@code FILE_NAME} 替换路径中的
+ * {@code {FILE_NAME}} 占位符；明细的 {@code FIELD_NAME/FIELD_VALUE} 作为
+ * extraFields 传入 FieldMapping</li>
  * </ul>
  *
- * <p>前稽核与后审计已合并到 insertDataAndVerify 中，在落库后使用
+ * <p>
+ * 前稽核与后审计已合并到 insertDataAndVerify 中，在落库后使用
  * CloseableIterator.getRecordCount() 统一校验，无需额外 FTP 流。
  * 清表操作在落库之前执行，确保数据完整性。
  */
@@ -116,11 +119,13 @@ public class SingleUploadHandler implements TransferHandler {
     /**
      * BATCH 模式：从明细表获取文件名并上传单个文件。
      *
-     * <p>与 {@link #handleSingle} 走相同的 preCheck → truncateTable →
+     * <p>
+     * 与 {@link #handleSingle} 走相同的 preCheck → truncateTable →
      * insertDataAndVerify → postProcess 管线，仅文件路径解析方式不同：
      * 从明细表取 {@code FILE_NAME} 替换路径中的 {@code {FILE_NAME}} 占位符。
      *
-     * <p>明细表的 {@code FIELD_NAME/FIELD_VALUE} 通过 detailContext 参数
+     * <p>
+     * 明细表的 {@code FIELD_NAME/FIELD_VALUE} 通过 detailContext 参数
      * 传递给 insertDataAndVerify，内部自动构建包含 extraFields 的 FieldMapping。
      */
     private void handleBatch(Command command, TransferConfig config, Result result) throws Exception {
@@ -157,14 +162,14 @@ public class SingleUploadHandler implements TransferHandler {
 
         // 3. 取明细稽核数（优先于 command 级）
         Integer auditCount = detail.get(ColumnNames.AUDIT_COUNT) != null
-                ? ((Number) detail.get(ColumnNames.AUDIT_COUNT)).intValue() : null;
+                ? ((Number) detail.get(ColumnNames.AUDIT_COUNT)).intValue()
+                : null;
 
         try {
             UploadSupport.UploadResult r = transferSupport.executeWithClient(ftpName, client -> {
                 // Phase 1: preCheck — 标志文件检查
                 UploadSupport.UploadResult checkResult = support.preCheck(client, config, fileInfo, filePath);
                 if (checkResult != null) {
-                    detailRepository.updateStatus(detailId, ColumnNames.STATUS_SKIPPED, nodeId);
                     return checkResult; // SKIPPED
                 }
 
@@ -187,6 +192,7 @@ public class SingleUploadHandler implements TransferHandler {
             // 根据结果更新明细状态和结果表
             if (ColumnNames.STATUS_SKIPPED.equals(r.status())) {
                 // preCheck 失败时已在回调内更新明细状态为 SKIPPED
+                detailRepository.updateStatus(detailId, ColumnNames.STATUS_SKIPPED, nodeId);
                 result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-check failed: flag not found");
                 return;
             }
