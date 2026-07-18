@@ -25,6 +25,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.IntFunction;
+import java.util.regex.Pattern;
 
 /**
  * UPLOAD_MULTI 场景的 SERIAL 模式：通配符匹配目录所有文件，
@@ -191,11 +192,68 @@ public class MultiUploadHandler implements TransferHandler {
     // ==================== 预扫描工具 ====================
 
     /**
-     * 预扫描文件列表，过滤出有效的数据文件。
+     * 将标志文件名模式转换为正则表达式，用于匹配标志文件。
      *
      * <p>
-     * 对于有数据文件但无对应标志文件的，日志告警并跳过。
+     * 已知变量（{stem}、{name}、{ext}、{dir}、{dn}、{up}）替换为 {@code [^/]+?}，
+     * 字面量部分做 {@link Pattern#quote} 转义，避免正则元字符冲突。
      * </p>
+     *
+     * <p>
+     * 示例：
+     * <ul>
+     *   <li>{@code {stem}.ok} → {@code ^[^/]+?\.ok$}</li>
+     *   <li>{@code {name}.ok} → {@code ^[^/]+?\.ok$}</li>
+     *   <li>{@code filename.ok} → {@code ^filename\.ok$}</li>
+     *   <li>{@code flag_{stem}.ok} → {@code ^flag_[^/]+?\.ok$}</li>
+     * </ul>
+     * </p>
+     */
+    static Pattern toFlagRegex(String flagPattern) {
+        if (flagPattern == null) return null;
+        // 按变量边界分割，保留变量作为独立元素
+        String[] parts = flagPattern.split("(?=\\{)|(?<=\\})", -1);
+        StringBuilder sb = new StringBuilder("^");
+        for (String part : parts) {
+            if (isBracketVariable(part)) {
+                sb.append("[^/]+?");
+            } else {
+                sb.append(Pattern.quote(part));
+            }
+        }
+        sb.append("$");
+        return Pattern.compile(sb.toString());
+    }
+
+    private static final Set<String> KNOWN_VARS = Set.of("stem", "name", "ext", "dir", "dn", "up");
+
+    private static boolean isBracketVariable(String s) {
+        return s != null && s.length() > 2
+                && s.charAt(0) == '{' && s.charAt(s.length() - 1) == '}'
+                && KNOWN_VARS.contains(s.substring(1, s.length() - 1));
+    }
+
+    /**
+     * 预扫描：用正则从文件列表中分离出标志文件，再交叉筛选有效数据文件。
+     *
+     * <p>
+     * 对比旧方案（用 {@link #resolveFlagName} 对文件自身做自识别），
+     * 正则匹配能兼容所有变量命名模式（{stem}、{name} 等），
+     * 不会出现 {@code {name}.ok} 模式下标志文件自识别失败的问题。
+     * </p>
+     *
+     * <p>
+     * 流程：
+     * <ol>
+     *   <li>用 {@link #toFlagRegex} 将标志模式转为正则，扫描文件列表分离出 标志文件集合 和 候选数据文件</li>
+     *   <li>对每个候选数据文件，计算期望标志文件名，检查是否在标志文件集合中</li>
+     *   <li>有 → 加入有效数据文件；无 → 日志告警并跳过</li>
+     * </ol>
+     * </p>
+     *
+     * @param allFiles    FTP 目录列表全部文件
+     * @param flagPattern 标志文件名模式（如 {@code {stem}.ok}）
+     * @return 有效数据文件（有对应标志文件的数据文件）列表
      */
     List<String> prescanDataFiles(String[] allFiles, String flagPattern) {
         if (allFiles == null || allFiles.length == 0)
@@ -204,39 +262,35 @@ public class MultiUploadHandler implements TransferHandler {
             return new ArrayList<>(List.of(allFiles));
         }
 
-        // 预构建 ResolvedPath，一次解析供 name() 和 resolveFlagName 复用，避免重复的字符串操作
-        List<ResolvedPath> fileInfos = new ArrayList<>(allFiles.length);
-        Set<String> allNames = new HashSet<>();
+        Pattern flagRegex = toFlagRegex(flagPattern);
+
+        // Step 1: 用正则分离标志文件 和 候选数据文件
+        Set<String> flagNames = new HashSet<>();
+        List<String> candidateDataFiles = new ArrayList<>();
         for (String f : allFiles) {
-            ResolvedPath info = ResolvedPath.of(f);
-            fileInfos.add(info);
-            allNames.add(info.name());
+            String name = ResolvedPath.of(f).name();
+            if (flagRegex.matcher(name).matches()) {
+                flagNames.add(name);
+            } else {
+                candidateDataFiles.add(f);
+            }
         }
 
-        List<String> dataFiles = new ArrayList<>();
-        for (int i = 0; i < allFiles.length; i++) {
-            ResolvedPath fileInfo = fileInfos.get(i);
-            String name = fileInfo.name();
-
+        // Step 2: 交叉筛选——有对应标志的数据文件有效，无标志的告警跳过
+        List<String> validDataFiles = new ArrayList<>();
+        for (String f : candidateDataFiles) {
+            ResolvedPath fileInfo = ResolvedPath.of(f);
             String expectedFlagName = resolveFlagName(flagPattern, fileInfo);
-            if (expectedFlagName == null) {
-                dataFiles.add(allFiles[i]);
-                continue;
-            }
+            String expectedFlagFileName = fileNameOnly(expectedFlagName);
 
-            // 跳过标志文件本身
-            String expectedName = fileNameOnly(expectedFlagName);
-            if (name.equals(expectedName)) {
-                continue;
-            }
-            if (allNames.contains(expectedName)) {
-                dataFiles.add(allFiles[i]);
+            if (flagNames.contains(expectedFlagFileName)) {
+                validDataFiles.add(f);
             } else {
                 log.warn("Data file {} has no corresponding flag file (expected: {}), skipping",
-                        allFiles[i], expectedFlagName);
+                        f, expectedFlagName);
             }
         }
-        return dataFiles;
+        return validDataFiles;
     }
 
     static String resolveFlagName(String flagPattern, ResolvedPath fileInfo) {
@@ -297,30 +351,31 @@ public class MultiUploadHandler implements TransferHandler {
      * 扫描孤立标志文件并迁移到 error 目录。
      *
      * <p>
-     * 孤立标志文件 = 有标志文件但 prescanDataFiles 中没有匹配的数据文件。
+     * 用正则匹配定位标志文件，然后检查是否在有效数据文件对应的期望标志集合中。
+     * 不在则视为孤立标志文件，迁移到 error 目录。
      * </p>
      */
     private void moveOrphanedFlagFiles(FtpClient client, String[] allFiles,
             String flagPattern, List<String> validDataFiles) throws Exception {
-        // 收集有效数据文件对应的标志文件名
-        Set<String> validFlagNames = new HashSet<>();
+        Pattern flagRegex = toFlagRegex(flagPattern);
+        if (flagRegex == null) return;
+
+        // Step 1: 收集有效数据文件对应的期望标志文件名
+        Set<String> expectedFlagNames = new HashSet<>();
         for (String f : validDataFiles) {
-            String expectedName = resolveFlagName(flagPattern, ResolvedPath.of(f));
-            if (expectedName != null) {
-                validFlagNames.add(fileNameOnly(expectedName));
+            String expected = resolveFlagName(flagPattern, ResolvedPath.of(f));
+            if (expected != null) {
+                expectedFlagNames.add(fileNameOnly(expected));
             }
         }
 
-        // 遍历所有文件，将没有对应数据文件的标志文件迁到 error
+        // Step 2: 用正则定位标志文件，不在期望集合中的为孤立标志
         int orphanedCount = 0;
         for (String file : allFiles) {
-            String expectedFlagName = resolveFlagName(flagPattern, ResolvedPath.of(file));
-            if (expectedFlagName == null) continue;
+            String name = ResolvedPath.of(file).name();
+            if (!flagRegex.matcher(name).matches()) continue; // 不是标志文件
 
-            String name = fileNameOnly(file);
-            String expectedName = fileNameOnly(expectedFlagName);
-
-            if (name.equals(expectedName) && !validFlagNames.contains(name)) {
+            if (!expectedFlagNames.contains(name)) {
                 log.warn("Orphaned flag file, moving to error: {}", file);
                 try {
                     client.moveToErrorDir(file);
