@@ -278,30 +278,29 @@ public class MultiUploadHandler implements TransferHandler {
         if (allFiles == null || allFiles.length == 0)
             return List.of();
 
-        // Step 1: 数据文件正则过滤——只保留匹配数据文件命名模式的文件
+        // 一次遍历完成数据文件和标志文件的分类
+        Pattern flagRegex = flagPattern != null ? toFlagRegex(flagPattern) : null;
         List<String> dataFiles = new ArrayList<>();
-        for (String f : allFiles) {
-            if (listRegex == null || listRegex.matcher(ResolvedPath.of(f).name()).matches()) {
-                dataFiles.add(f);
-            }
-        }
-        if (flagPattern == null) {
-            return dataFiles; // 无 flag 模式，数据文件即为有效
-        }
-
-        // Step 2: 标志文件正则过滤——从 allFiles 中筛选出标志文件
-        Pattern flagRegex = toFlagRegex(flagPattern);
         Set<String> flagNames = new HashSet<>();
         Map<String, String> flagFilePaths = new HashMap<>();
+
         for (String f : allFiles) {
             String name = ResolvedPath.of(f).name();
-            if (flagRegex.matcher(name).matches()) {
+            boolean isFlag = flagRegex != null && flagRegex.matcher(name).matches();
+            boolean isData = listRegex == null || listRegex.matcher(name).matches();
+
+            if (isFlag) {
                 flagNames.add(name);
                 flagFilePaths.put(name, f);
             }
+            if (isData && !isFlag) {
+                dataFiles.add(f);
+            }
         }
-        // 从数据文件列表中排除标志文件（避免将标志文件本身当作数据文件处理）
-        dataFiles.removeIf(f -> flagNames.contains(ResolvedPath.of(f).name()));
+
+        if (flagPattern == null) {
+            return dataFiles; // 无 flag 模式，数据文件即为有效
+        }
 
         // Step 3: 遍历数据文件列表，有对应标志的列为有效并从标志集合中删除
         List<String> validDataFiles = new ArrayList<>();
