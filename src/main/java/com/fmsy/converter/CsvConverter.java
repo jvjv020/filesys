@@ -1,7 +1,6 @@
 package com.fmsy.converter;
 
 import com.fmsy.model.FieldMapping;
-import com.fmsy.util.SystemConstants;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.*;

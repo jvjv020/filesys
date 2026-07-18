@@ -4,10 +4,8 @@ import com.fmsy.config.DataSourceConfig;
 import com.fmsy.converter.CloseableIterator;
 import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
-import com.fmsy.exception.FlagCheckException;
 import com.fmsy.fileops.FlagFileService;
 import com.fmsy.ftp.FtpClient;
-import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.TargetTableRepository;
@@ -82,16 +80,11 @@ public class UploadSupport {
      */
     public UploadResult preCheck(FtpClient client, TransferConfig config,
             ResolvedPath fileInfo, String filePath) {
-        try {
-            if (!transferSupport.preCheck(client, config, fileInfo)) {
-                String flagPath = resolveConfiguredFlagPath(config.getPreOperations(), fileInfo);
-                log.warn("Pre-check failed (flag not found), flag file: {}, data file: {}",
-                        flagPath != null ? flagPath : "unknown", filePath);
-                return new UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED);
-            }
-        } catch (FlagCheckException e) {
-            // FLAG 比对失败，上抛由调用方处理（迁文件到 error 目录）
-            throw e;
+        if (!transferSupport.preCheck(client, config, fileInfo)) {
+            String flagPath = resolveConfiguredFlagPath(config.getPreOperations(), fileInfo);
+            log.warn("Pre-check failed (flag not found), flag file: {}, data file: {}",
+                    flagPath != null ? flagPath : "unknown", filePath);
+            return new UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED);
         }
         return null;
     }
@@ -265,9 +258,6 @@ public class UploadSupport {
             return transferSupport.executeWithClient(ftpName, client ->
                     executeFilePipeline(client, config, fileInfo, filePath,
                             mapping, detailContext, auditCount));
-        } catch (FlagCheckException e) {
-            moveDataAndFlagToErrorDir(ftpName, filePath, config);
-            return new UploadResult(0, 0, 0, 1, ColumnNames.STATUS_ERROR);
         } catch (RuntimeException e) {
             moveDataAndFlagToErrorDir(ftpName, filePath, config);
             return new UploadResult(0, 0, 0, 1, ColumnNames.STATUS_ERROR);

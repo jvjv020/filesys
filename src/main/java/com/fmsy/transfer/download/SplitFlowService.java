@@ -7,7 +7,6 @@ import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.util.LogUtils;
-import com.fmsy.util.SystemConstants;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;

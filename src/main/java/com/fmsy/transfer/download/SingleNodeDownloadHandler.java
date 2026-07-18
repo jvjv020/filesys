@@ -14,7 +14,6 @@ import com.fmsy.transfer.TransferSupport;
 import com.fmsy.transfer.download.BucketProcessor.BucketBatchResult;
 import com.fmsy.transfer.download.BucketProcessor.BucketProcessingOptions;
 import static com.fmsy.transfer.TransferSupport.determineMainStatus;
-import com.fmsy.util.ColumnNames;
 import com.fmsy.util.FilePathUtils;
 import com.fmsy.util.ResolvedPath;
 import lombok.RequiredArgsConstructor;
