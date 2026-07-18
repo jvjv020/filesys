@@ -10,7 +10,7 @@ package com.fmsy.util;
  * - MONITOR_INTERVAL_MS: 子命令监控轮询间隔（毫秒）
  * - TEMP_DIR_NAME: 临时文件目录名
  * - MERGE_POLL_INTERVAL_MS: 合流程轮询间隔
- * - TEMP_FILE_SUFFIX / OK_FILE_SUFFIX: 临时文件及就绪标志扩展名
+ * - TEMP_FILE_SUFFIX: 临时文件扩展名
  * - SPLIT_DONE_FLAG: 拆分完成标记
  */
 public final class SystemConstants {
@@ -31,14 +31,6 @@ public final class SystemConstants {
     public static final int MERGE_POLL_INTERVAL_MS = 3000;
     /** 临时文件扩展名 */
     public static final String TEMP_FILE_SUFFIX = ".tmp";
-    /**
-     * 临时文件就绪标志扩展名。
-     *
-     * <p>子节点写完 .tmp 后再创建一个同名的空 .ok 文件，
-     * 主节点合流程只合并存在对应 .ok 文件的临时文件，
-     * 防止子节点还在写入时主节点读到不完整的文件。</p>
-     */
-    public static final String OK_FILE_SUFFIX = ".ok";
     /** 拆分完成标记（写入主指令 extra_info） */
     public static final String SPLIT_DONE_FLAG = "SPLIT_DONE";
 

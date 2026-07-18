@@ -26,7 +26,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.io.OutputStream;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -46,7 +45,6 @@ import java.util.function.IntFunction;
  *   <li>解析 specName {@code "partitionName|pkStart|pkEnd"} 获取 PK 范围</li>
  *   <li>查目标表,用 writeDataRecords 仅写数据记录到临时文件</li>
  *   <li>上传临时文件到 FTP {@code {target_dir}/temp/{detailId}.tmp}</li>
- *   <li>创建 OK 哨兵文件,标记临时文件已完整写入</li>
  *   <li>更新明细状态为 Y(成功) 或 E(失败)</li>
  *   <li>退出:无空闲桶 + 主指令已拆分完成 → 退出</li>
  * </ol>
@@ -219,18 +217,7 @@ public class ChildBucketProcessor {
             processByFieldValue(config, ftpName, tempFilePath, converter, mapping, fieldValue);
         }
 
-        // 5) 创建 OK 哨兵文件,标记临时文件已完整写入
-        //    主节点合流程见 .ok 才合并该 .tmp,防止读取不完整的文件
-        String okFilePath = tempDir + "/" + bucket.getId() + SystemConstants.OK_FILE_SUFFIX;
-        ftpPool.withClient(ftpName, client -> {
-            try (OutputStream os = client.getOutputStream(okFilePath)) {
-                // 写入空文件即表示完成信号
-            }
-            client.completePendingCommand();
-            return null;
-        });
-
-        // 6) 更新明细为 Y
+        // 5) 更新明细为 Y
         detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_SUCCESS, nodeId);
     }
 

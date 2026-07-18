@@ -244,22 +244,15 @@ public class MergeFlowService {
     /**
      * APPE 临时文件到目标文件。
      *
-     * <p>先检查对应的 .ok 哨兵文件是否存在,确保子节点已完整写入临时文件后才合并,
-     * 防止读取写入中的不完整文件。</p>
+     * <p>先检查临时文件是否存在,确保子节点已写入后再合并。</p>
      *
-     * @return true=合并成功; false=临时文件未就绪(ok 文件不存在)或合并失败
+     * @return true=合并成功; false=临时文件不存在或合并失败
      */
     private boolean appendTempFile(String ftpName, String tempPath, String targetPath) {
         try {
             return ftpPool.withClient(ftpName, (FtpPool.FtpCallback<Boolean>) client -> {
-                // 检查 OK 哨兵文件 — 子节点写完 .tmp 后再写 .ok
-                String okPath = toOkPath(tempPath);
-                if (!client.exists(okPath)) {
-                    log.debug("Temp file not ready (no .ok): {}", tempPath);
-                    return false;
-                }
                 if (!client.exists(tempPath)) {
-                    log.warn("Temp file missing (ok exists but tmp gone): {}", tempPath);
+                    log.debug("Temp file not ready: {}", tempPath);
                     return false;
                 }
                 try (var in = client.getInputStream(tempPath)) {
@@ -331,29 +324,13 @@ public class MergeFlowService {
         }
     }
 
-    /** 删除 FTP 临时文件及对应的 OK 哨兵文件 */
+    /** 删除 FTP 临时文件 */
     private void deleteTempFile(String ftpName, String path) {
-        // 先删 .ok 哨兵文件
-        String okPath = toOkPath(path);
-        try {
-            ftpPool.withClient(ftpName, (FtpPool.FtpVoidCallback) client -> client.deleteFile(okPath));
-        } catch (Exception e) {
-            log.debug("Failed to delete ok {}: {}", okPath, e.getMessage());
-        }
-        // 再删 .tmp 临时文件
         try {
             ftpPool.withClient(ftpName, (FtpPool.FtpVoidCallback) client -> client.deleteFile(path));
         } catch (Exception e) {
             log.debug("Failed to delete temp {}: {}", path, e.getMessage());
         }
-    }
-
-    // ==================== 文件路径工具 ====================
-
-    /** 将 .tmp 路径转换为对应的 .ok 路径 */
-    private static String toOkPath(String tempPath) {
-        return tempPath.substring(0, tempPath.length() - SystemConstants.TEMP_FILE_SUFFIX.length())
-                + SystemConstants.OK_FILE_SUFFIX;
     }
 
     // ==================== 状态检查 ====================
