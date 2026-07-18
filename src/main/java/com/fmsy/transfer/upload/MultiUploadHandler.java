@@ -256,22 +256,23 @@ public class MultiUploadHandler implements TransferHandler {
      * @return 有效数据文件（有对应标志文件的数据文件）列表
      */
     List<String> prescanDataFiles(String[] allFiles, String flagPattern) {
-        return prescanDataFiles(allFiles, flagPattern, null);
+        return prescanDataFiles(allFiles, flagPattern, null, null);
     }
 
     /**
      * 预扫描：用正则从文件列表中分离出标志文件，再交叉筛选有效数据文件。
      *
-     * <p>当 {@code flagPattern} 为 null（无 flag 模式）时，使用 {@code listRegex}
-     * 过滤文件列表，只保留匹配数据文件命名模式的文件。
+     * <p>有 flag 模式时，完成筛选后一并处理孤立标志文件迁移。
+     * 无 flag 模式时，使用 {@code listRegex} 过滤文件列表，只保留匹配数据文件命名模式的文件。
      * </p>
      *
      * @param allFiles    FTP 目录列表全部文件
      * @param flagPattern 标志文件名模式，null 表示无 flag 模式
-     * @param listRegex   数据文件命名正则（无 flag 模式时使用，用于过滤额外文件）
+     * @param listRegex   数据文件命名正则，用于过滤额外文件
+     * @param client      FTP 客户端（非 null 时执行孤立标志文件迁移）
      * @return 有效数据文件列表
      */
-    List<String> prescanDataFiles(String[] allFiles, String flagPattern, Pattern listRegex) {
+    List<String> prescanDataFiles(String[] allFiles, String flagPattern, Pattern listRegex, FtpClient client) {
         if (allFiles == null || allFiles.length == 0)
             return List.of();
         if (flagPattern == null) {
@@ -321,6 +322,11 @@ public class MultiUploadHandler implements TransferHandler {
                 log.warn("Data file {} has no corresponding flag file (expected: {}), skipping",
                         f, expectedFlagName);
             }
+        }
+
+        // Step 3: 孤立标志文件迁移
+        if (client != null) {
+            moveOrphanedFlagFiles(client, allFiles, flagPattern, validDataFiles);
         }
         return validDataFiles;
     }
@@ -372,11 +378,10 @@ public class MultiUploadHandler implements TransferHandler {
     }
 
     /**
-     * 单次 FTP 连接内完成：文件列表 + 标志检查 + 异常文件处理。
+     * 单次 FTP 连接内完成：文件列表 + 头部检查 + 异常文件处理。
      *
      * <p>
-     * 委托给 {@link #prescanDataFiles} 做基础过滤后，
-     * 再单独处理孤立标志文件迁移。
+     * 委托给 {@link #prescanDataFiles} 完成有效数据文件筛选和孤立标志文件迁移。
      * </p>
      *
      * @param ftpName     FTP 连接名
@@ -393,13 +398,9 @@ public class MultiUploadHandler implements TransferHandler {
 
             String flagPattern = UploadSupport.extractFlagPathPattern(config.getPreOperations());
 
-            // Phase A: prescanDataFiles 过滤有效数据文件
-            // 用 listPattern 转正则做二次过滤，排除 FTP 返回的额外文件
+            // 统一走 prescanDataFiles 筛选有效数据文件 + 孤立标志文件迁移
             Pattern listRegex = globToRegex(listPattern);
-            List<String> validFiles = prescanDataFiles(allFiles, flagPattern, listRegex);
-
-            // Phase B: 孤立标志文件迁移到 error 目录
-            moveOrphanedFlagFiles(client, allFiles, flagPattern, validFiles);
+            List<String> validFiles = prescanDataFiles(allFiles, flagPattern, listRegex, client);
 
             log.info("Prescan result: {} valid files (pattern: {})", validFiles.size(), listPattern);
             return validFiles;
