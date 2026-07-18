@@ -47,24 +47,25 @@ public class SerialConstraintChecker {
         }
         String currentNodeId = appConfig.getNode().getId();
 
-        // S型子命令特殊处理
+        // S型子命令特殊处理：同主命令的 S 子命令允许跨节点并发，
+        // 不同主命令且同节点已有同类命令时也允许（本节点自己可处理多个子命令）
         if (command.getCommandType() == CommandType.COORDINATED) {
             String key = command.getCategoryCode() + "_" + command.getControlCode();
             CommandProcessingTracker info = processingMap.get(key);
             if (info != null && info.isHasSType()) {
                 String mainCommandId = command.getExtraInfo();
-                if (mainCommandId != null && info.getMainCommandId() != null
-                        && mainCommandId.equals(info.getMainCommandId())) {
-                    // 同主命令的子命令，允许并发
-                } else {
-                    // 同节点已有该主命令的指令（主指令或同主S指令），豁免串行约束
-                    if (info.hasMainId(currentNodeId, mainCommandId)) {
-                        // 允许并发
-                    } else {
-                        return false; // 不同主命令，需要等待
-                    }
+                // 同主命令的子命令(任意节点处理中)允许并发
+                if (mainCommandId != null && info.hasMainCommandId(mainCommandId)) {
+                    return true;
                 }
+                // 同节点已有该主命令的指令,豁免串行约束
+                if (info.hasMainId(currentNodeId, mainCommandId)) {
+                    return true;
+                }
+                // 不同主命令且不同节点,需要等待
+                return false;
             }
+            // info == null:无同类命令处理中，直接放行（走下方通用检查也会放行）
         }
 
         String key = command.getCategoryCode() + "_" + command.getControlCode();

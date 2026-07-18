@@ -16,6 +16,7 @@ import com.fmsy.repository.ResultRepository;
 import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferSupport;
+import com.fmsy.transfer.TransferUtils;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.FilePathUtils;
 import com.fmsy.util.LogUtils;
@@ -30,18 +31,24 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntFunction;
 
 /**
  * 子节点桶处理器 — 处理 DOWNLOAD_MULTI_NODE 场景下 S 型子命令的桶执行。
  *
  * <p>子节点接到 S 子指令后,循环竞争空闲分桶:
  * <ol>
- *   <li>原子 UPDATE 竞争空闲桶(状态=空 → P)</li>
+ *   <li>批量原子 UPDATE 竞争空闲桶(状态=空 → P,一次抢多个减少轮询)</li>
+ *   <li>线程池并发处理多个桶</li>
  *   <li>解析 specName {@code "partitionName|pkStart|pkEnd"} 获取 PK 范围</li>
  *   <li>查目标表,用 writeDataRecords 仅写数据记录到临时文件</li>
  *   <li>上传临时文件到 FTP {@code {target_dir}/temp/{detailId}.tmp}</li>
+ *   <li>创建 OK 哨兵文件,标记临时文件已完整写入</li>
  *   <li>更新明细状态为 Y(成功) 或 E(失败)</li>
- *   <li>检查退出:无空闲桶 + 主指令已拆分完成 → 退出</li>
+ *   <li>退出:无空闲桶 + 主指令已拆分完成 → 退出</li>
  * </ol>
  *
  * <p>不写文件头/文件尾,由主节点合流程统一处理。
@@ -62,9 +69,11 @@ public class ChildBucketProcessor {
     private final TransferSupport transferSupport;
     private final ResultRepository resultRepository;
     private final AppConfig appConfig;
+    private final IntFunction<ExecutorService> batchExecutorFactory;
 
     /**
      * 子节点入口 — 循环竞争桶并处理,直到所有桶处理完毕。
+     * 使用线程池并发处理,批量竞争减少轮询次数。
      */
     public void pollAndProcess(String nodeId, Command subCommand, TransferConfig config) {
         long startTime = System.currentTimeMillis();
@@ -93,14 +102,18 @@ public class ChildBucketProcessor {
         int maxIterations = appConfig.getDownload().getMaxPollIterations();
         long timeoutMs = appConfig.getPolling().getTaskTimeoutHours() * 3600_000L;
 
-        int successCount = 0;
-        int failedCount = 0;
-        int totalBuckets = 0;
+        AtomicInteger successCount = new AtomicInteger(0);
+        AtomicInteger failedCount = new AtomicInteger(0);
+        AtomicInteger totalBuckets = new AtomicInteger(0);
 
         String ftpName = config.getFtpName();
         ResolvedPath baseFileInfo = ResolvedPath.of(config.getFilePath());
         String targetParent = FilePathUtils.extractParentDirectory(baseFileInfo.fullPath());
         String tempDir = (targetParent != null ? targetParent : "") + "/" + SystemConstants.TEMP_DIR_NAME;
+
+        // 并发度:配置的并行线程数,上限 5
+        int concurrency = Math.min(appConfig.getDownload().getParallelThreads(), 5);
+        ExecutorService executor = batchExecutorFactory.apply(concurrency);
 
         try {
             for (int iteration = 0; iteration < maxIterations; iteration++) {
@@ -110,9 +123,9 @@ public class ChildBucketProcessor {
                     break;
                 }
 
-                // 竞争一个空闲桶
-                Detail bucket = competeBucket(mainCommandId, nodeId);
-                if (bucket == null) {
+                // 批量竞争桶(一次抢 concurrency 个)
+                List<Detail> buckets = competeBuckets(mainCommandId, nodeId, concurrency);
+                if (buckets.isEmpty()) {
                     boolean splitDone = commandRepository.isSplitDone(mainCommandId);
                     boolean hasEmpty = detailRepository.countByStatus(
                             mainCommandId, ColumnNames.STATUS_EMPTY) > 0;
@@ -120,80 +133,90 @@ public class ChildBucketProcessor {
                         log.info("Child[{}] no more buckets, split done, exiting", subCmdId);
                         break;
                     }
-                    safeSleep(2000);
+                    // 指数退避:第1次2s,第2次4s,最大10s
+                    safeSleep(computeBackoffMs(iteration));
                     continue;
                 }
 
-                totalBuckets++;
+                totalBuckets.addAndGet(buckets.size());
 
-                try {
-                    processBucket(bucket, config, ftpName, tempDir, pkColumns, converter, mapping, nodeId);
-                    successCount++;
-                } catch (Exception e) {
-                    log.error("Child[{}] bucket {} failed: {}", subCmdId, bucket.getId(), e.getMessage(), e);
-                    detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_ERROR, nodeId);
-                    failedCount++;
+                // 提交到线程池并发处理
+                for (Detail bucket : buckets) {
+                    executor.execute(() -> {
+                        try {
+                            processBucket(bucket, config, ftpName, tempDir, pkColumns,
+                                    converter, mapping, nodeId);
+                            successCount.incrementAndGet();
+                        } catch (Exception e) {
+                            log.error("Child[{}] bucket {} failed: {}", subCmdId,
+                                    bucket.getId(), e.getMessage(), e);
+                            detailRepository.updateStatus(bucket.getId(),
+                                    ColumnNames.STATUS_ERROR, nodeId);
+                            failedCount.incrementAndGet();
+                        }
+                    });
                 }
             }
         } catch (Exception e) {
             log.error("Child[{}] unexpected: {}", subCmdId, e.getMessage(), e);
-            failedCount++;
+            failedCount.incrementAndGet();
+        } finally {
+            // 等待所有已提交的桶处理完毕
+            TransferUtils.shutdownExecutor(executor, 1, TimeUnit.HOURS, "ChildBucketProcessor");
         }
 
-        writeSubCommandResult(subCommand, startTime, config, totalBuckets, successCount, failedCount, 0);
+        writeSubCommandResult(subCommand, startTime, config,
+                totalBuckets.get(), successCount.get(), failedCount.get(), 0);
     }
 
-    /** 原子竞争一个空闲桶,竞争成功返回 Detail,失败返回 null */
-    private Detail competeBucket(Long mainCommandId, String nodeId) {
-        List<Detail> buckets = detailRepository.findReadyBuckets(mainCommandId, 1);
-        if (buckets.isEmpty()) return null;
-        Detail bucket = buckets.get(0);
-        int affected = detailRepository.competeBucket(bucket.getId(), nodeId);
-        return affected == 1 ? bucket : null;
+    /**
+     * 批量竞争空闲桶—一次抢多个,减少轮询次数。
+     * 原子 UPDATE 竞争,已被其他节点抢走的自动跳过。
+     */
+    private List<Detail> competeBuckets(Long mainCommandId, String nodeId, int limit) {
+        List<Detail> candidates = detailRepository.findReadyBuckets(mainCommandId, limit);
+        if (candidates.isEmpty()) return List.of();
+
+        List<Detail> won = new ArrayList<>();
+        for (Detail bucket : candidates) {
+            int affected = detailRepository.competeBucket(bucket.getId(), nodeId);
+            if (affected == 1) {
+                won.add(bucket);
+            }
+        }
+        return won;
     }
 
-    /** 处理单个桶:按 PK 范围查数据 → 写数据记录到临时文件 → 上传 FTP */
+    /** 计算退避时间:第1次2s,第2次4s,最大10s */
+    private static long computeBackoffMs(int iteration) {
+        if (iteration <= 0) return 2000;
+        return Math.min(10000L, 2000L * (1L << Math.min(iteration, 3)));
+    }
+
+    /** 处理单个桶:查数据 → 写数据记录到临时文件 → 上传 FTP */
     private void processBucket(Detail bucket, TransferConfig config, String ftpName,
                                 String tempDir, List<String> pkColumns,
                                 FileConverter converter, FieldMapping mapping,
                                 String nodeId) throws Exception {
-        // 1) 解析 specName = "partitionName|pkStart|pkEnd"
-        String specName = bucket.getSpecName();
-        if (specName == null || specName.isEmpty()) {
-            throw new IllegalArgumentException("Bucket " + bucket.getId() + " has no specName");
-        }
-        String[] parts = specName.split("\\|", 3);
-        String actualTable = parts[0];
-        String pkStartRaw = parts.length > 1 ? parts[1] : "";
-        String pkEndRaw = parts.length > 2 ? parts[2] : "LAST";
-        boolean hasEndBound = !"LAST".equals(pkEndRaw);
-
-        // specName 为 ""|start|end 时(非分区表),actualTable="" 需用原表名
-        String queryTable = !actualTable.isEmpty() ? actualTable : config.getTableName();
-
-        // 2) 构建 PK 范围参数
-        List<Object> pkStart = parsePkValues(pkStartRaw);
-        List<Object> pkEnd = hasEndBound ? parsePkValues(pkEndRaw) : null;
-
-        // 3) 确保 temp 目录存在
         String tempFilePath = tempDir + "/" + bucket.getId() + SystemConstants.TEMP_FILE_SUFFIX;
         ftpPool.withClient(ftpName, client -> {
             client.mkdirs(tempDir);
             return null;
         });
 
-        // 4) 查数据并写临时文件(仅数据记录,不带头尾)
-        try (var data = targetTableRepository.streamByPkRange(
-                config.getDbName(), queryTable, pkColumns,
-                pkStart.isEmpty() ? null : pkStart,
-                pkEnd)) {
-            ftpPool.withClient(ftpName, client -> {
-                try (OutputStream os = client.getOutputStream(tempFilePath)) {
-                    converter.writeDataRecords(os, data, mapping);
-                }
-                client.completePendingCommand();
-                return null;
-            });
+        String specName = bucket.getSpecName();
+        if (specName != null && !specName.isEmpty()) {
+            // Path A: PK 范围查询(由 SplitFlowService 创建,含 specName)
+            processByPkRange(bucket, config, ftpName, tempFilePath, pkColumns, converter, mapping,
+                    specName);
+        } else {
+            // Path B: 字段值降级查询(BATCH 模式或外部预填的 field_value 桶)
+            String fieldValue = bucket.getFieldValue();
+            if (fieldValue == null || fieldValue.isEmpty()) {
+                throw new IllegalArgumentException("Bucket " + bucket.getId()
+                        + " has neither specName nor fieldValue");
+            }
+            processByFieldValue(config, ftpName, tempFilePath, converter, mapping, fieldValue);
         }
 
         // 5) 创建 OK 哨兵文件,标记临时文件已完整写入
@@ -209,6 +232,66 @@ public class ChildBucketProcessor {
 
         // 6) 更新明细为 Y
         detailRepository.updateStatus(bucket.getId(), ColumnNames.STATUS_SUCCESS, nodeId);
+    }
+
+    // ==================== 桶查询策略 ====================
+
+    /**
+     * Path A: 按 PK 范围查数据并写临时文件。
+     * specName 格式: "partitionName|pkStart|pkEnd"
+     */
+    private void processByPkRange(Detail bucket, TransferConfig config, String ftpName,
+                                   String tempFilePath, List<String> pkColumns,
+                                   FileConverter converter, FieldMapping mapping,
+                                   String specName) throws Exception {
+        String[] parts = specName.split("\\|", 3);
+        String actualTable = parts[0];
+        String pkStartRaw = parts.length > 1 ? parts[1] : "";
+        String pkEndRaw = parts.length > 2 ? parts[2] : "LAST";
+        boolean hasEndBound = !"LAST".equals(pkEndRaw);
+
+        // specName 为 ""|start|end 时(非分区表),actualTable="" 需用原表名
+        String queryTable = !actualTable.isEmpty() ? actualTable : config.getTableName();
+
+        List<Object> pkStart = parsePkValues(pkStartRaw);
+        List<Object> pkEnd = hasEndBound ? parsePkValues(pkEndRaw) : null;
+
+        try (var data = targetTableRepository.streamByPkRange(
+                config.getDbName(), queryTable, pkColumns,
+                pkStart.isEmpty() ? null : pkStart,
+                pkEnd)) {
+            ftpPool.withClient(ftpName, client -> {
+                try (OutputStream os = client.getOutputStream(tempFilePath)) {
+                    converter.writeDataRecords(os, data, mapping);
+                }
+                client.completePendingCommand();
+                return null;
+            });
+        }
+    }
+
+    /**
+     * Path B: 按字段值查数据并写临时文件(降级路径)。
+     * 适用于 BATCH 模式或外部预填的 field_value 桶(无 specName 但有 fieldValue)。
+     */
+    private void processByFieldValue(TransferConfig config, String ftpName,
+                                     String tempFilePath, FileConverter converter,
+                                     FieldMapping mapping, String fieldValue) throws Exception {
+        String splitFields = config.getSplitFields();
+        if (splitFields == null || splitFields.isEmpty()) {
+            throw new IllegalArgumentException("No splitFields in config for fieldValue bucket");
+        }
+        try (var data = targetTableRepository.streamBucketData(
+                config.getDbName(), config.getTableName(),
+                splitFields, fieldValue)) {
+            ftpPool.withClient(ftpName, client -> {
+                try (OutputStream os = client.getOutputStream(tempFilePath)) {
+                    converter.writeDataRecords(os, data, mapping);
+                }
+                client.completePendingCommand();
+                return null;
+            });
+        }
     }
 
     /** 将 PK 值的逗号串(如 "100,200")解析为 Object 列表 */
@@ -230,7 +313,7 @@ public class ChildBucketProcessor {
 
     // ==================== 子命令结果 ====================
 
-    /** 写子命令结束的结果表记录 */
+    /** 写子命令结束的结果表记录,子命令失败时同步通知主命令 */
     private void writeSubCommandResult(Command subCommand, long startTime,
                                         TransferConfig config, int totalBuckets,
                                         int success, int failed, int skipped) {
@@ -258,7 +341,41 @@ public class ChildBucketProcessor {
                 .build();
         resultRepository.insert(r);
 
+        // 子命令失败时直接通知主命令,避免 MergeFlowService 成为唯一错误传播路径
+        if (failed > 0) {
+            notifyMainCommandOnFailure(subCommand, config);
+        }
+
         log.info("Child[{}] finished: {} (buckets total={} success={} failed={}, {}ms)",
+                subCommand.getId(), status, totalBuckets, success, failed, durationMs);
+    }
+
+    /**
+     * 子命令失败时通知主命令:将主命令置 ERROR + 写结果行。
+     * best-effort:主命令可能已被其他子命令或 MergeFlowService 更新过状态。
+     */
+    private void notifyMainCommandOnFailure(Command subCommand, TransferConfig config) {
+        String extraInfo = subCommand.getExtraInfo();
+        if (extraInfo == null || !extraInfo.contains("|")) {
+            log.warn("Cannot parse main command ID from extraInfo: {}", extraInfo);
+            return;
+        }
+        try {
+            Long mainCommandId = Long.parseLong(extraInfo.substring(0, extraInfo.indexOf('|')));
+            // 原子条件更新:仅当主命令仍为 P 时才置 E
+            int affected = commandRepository.updateStatusIfProcessing(mainCommandId,
+                    ColumnNames.STATUS_ERROR);
+            if (affected > 0) {
+                commandRepository.markErrorWithResult(mainCommandId,
+                        subCommand.getCategoryCode(), subCommand.getControlCode(),
+                        "Sub-command " + subCommand.getId() + " failed");
+                log.warn("Notified main command {} of sub-command {} failure", mainCommandId,
+                        subCommand.getId());
+            }
+        } catch (Exception e) {
+            log.warn("Failed to notify main command on sub-command failure: {}", e.getMessage());
+        }
+    }
                 subCommand.getId(), status, totalBuckets, success, failed, durationMs);
     }
 

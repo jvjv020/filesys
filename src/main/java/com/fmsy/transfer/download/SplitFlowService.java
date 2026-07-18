@@ -45,6 +45,16 @@ public class SplitFlowService {
     private final AppConfig appConfig;
 
     /**
+     * 同步拆分执行 — 创建 PK 范围桶并写入明细表,完成后标记 splitDone。
+     * <p>供 MultiNodeDownloadHandler 在 SERIAL 模式下同步调用,确保桶已创建后再创建 S 子命令。
+     */
+    public void splitSync(Long mainCommandId, TransferConfig config) {
+        LogUtils.setTaskId(mainCommandId);
+        doSplit(mainCommandId, config);
+        log.info("Sync split completed for command: {}", mainCommandId);
+    }
+
+    /**
      * 异步启动拆分流程(适用于单文件下发或拆分下发,根据 config 自动判断)。
      * 完成后自动更新主指令 extra_info 标记拆分完成。
      */

@@ -67,6 +67,26 @@ public class CommandRepository {
         log.info("Updated command status: id={}, status={}", commandId, status);
     }
 
+    private static final String SQL_UPDATE_STATUS_IF_PROCESSING =
+        "UPDATE " + TableNames.COMMAND_TABLE + " SET " +
+        ColumnNames.PROCESS_STATUS + "=?, " + ColumnNames.PROCESS_END_TIME + "=NOW() " +
+        "WHERE " + ColumnNames.ID + "=? AND " + ColumnNames.PROCESS_STATUS + "=?";
+
+    /**
+     * 条件更新:仅当命令当前为 PROCESSING 状态时才更新为新状态。
+     * 用于子命令失败时通知主命令,避免覆盖 MergeFlowService 已写入的终态。
+     *
+     * @return 受影响行数(0=未更新,说明状态已被其他路径修改)
+     */
+    public int updateStatusIfProcessing(Long commandId, String newStatus) {
+        int affected = getJdbc().update(SQL_UPDATE_STATUS_IF_PROCESSING,
+                newStatus, commandId, ColumnNames.STATUS_PROCESSING);
+        if (affected > 0) {
+            log.info("Conditional update (P→{}): id={}", newStatus, commandId);
+        }
+        return affected;
+    }
+
     /**
      * 一站式"配置缺失 → 置 ERROR + 写结果表"。把 3 处重复(updateStatus + insertSimple + 相同描述)合并为一个调用。
      * 由 {@code transfer.TransferService.process} / {@code polling.BatchDispatcher.dispatch} / 同类

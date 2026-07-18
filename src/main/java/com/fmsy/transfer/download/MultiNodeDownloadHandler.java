@@ -18,7 +18,8 @@ import org.springframework.stereotype.Component;
  *
  * <ul>
  *   <li>BATCH 模式:复用明细表已存在的桶,更新每个桶的 auditCount,再创建 S 子命令</li>
- *   <li>SERIAL 模式:从目标表 streamQuery DISTINCT 拿分桶值,创建桶 + 创建 S 子命令</li>
+ *   <li>SERIAL 模式:调用 SplitFlowService 按 PK 范围切分桶(写入 specName),再创建 S 子命令</li>
+ *   <li>两种模式均启动 MergeFlowService 异步合并临时文件到目标文件</li>
  *   <li>成功:result.markChildrenCreated()(主命令保持 PROCESSING,
  *       由 MergeFlowService 在合并完成后更新终态)</li>
  *   <li>失败:result.markChildrenFailed(reason)(主命令置 ERROR)</li>
@@ -36,6 +37,8 @@ public class MultiNodeDownloadHandler implements TransferHandler {
 
     private final BucketDistributor bucketDistributor;
     private final TransferSupport transferSupport;
+    private final SplitFlowService splitFlowService;
+    private final MergeFlowService mergeFlowService;
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
@@ -62,11 +65,23 @@ public class MultiNodeDownloadHandler implements TransferHandler {
 
         // Phase 2: DB-only work (no FTP client held)
         CommandType commandType = command.getCommandType();
-        int childCount = commandType == CommandType.BATCH
-                ? bucketDistributor.prepareBatchChildren(command, config, baseFilePath, splitFields)
-                : bucketDistributor.prepareSerialChildren(command, config, baseFilePath, splitFields);
+        int childCount;
+        if (commandType == CommandType.BATCH) {
+            // BATCH 模式:复用明细表已有桶,统计审计数后创建 S 子命令
+            childCount = bucketDistributor.prepareBatchChildren(command, config, baseFilePath, splitFields);
+        } else {
+            // SERIAL 模式:SplitFlowService 按 PK 范围切分桶(写入 specName 供子节点使用),
+            // 然后为所有空桶创建 S 型子命令
+            splitFlowService.splitSync(command.getId(), config);
+            childCount = bucketDistributor.createChildCommands(command.getId(),
+                    config.getCategoryCode(), config.getControlCode(), baseFilePath);
+        }
+
         if (childCount > 0) {
             log.info("Created {} S-type child commands for command: {}", childCount, command.getId());
+            // Phase 3: 启动异步合并流程(轮询 Y 桶 → APPE 合并 → 写标志文件)
+            mergeFlowService.startMergeAsync(command.getId(), config, baseFileInfo);
+            log.info("Started merge flow for command: {}", command.getId());
             result.markChildrenCreated(childCount);
         } else {
             result.markChildrenFailed("No buckets or child command creation returned 0");

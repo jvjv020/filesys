@@ -125,7 +125,6 @@ public class PollingService {
                 info.addNode(node);
                 if (CommandType.COORDINATED.code().equals(cmdType)) {
                     info.setHasSType(true);
-                    info.setMainCommandId(extraInfo);
                     if (extraInfo != null) {
                         info.recordMainId(node, extraInfo);
                     }

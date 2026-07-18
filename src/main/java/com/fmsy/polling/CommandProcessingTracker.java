@@ -16,10 +16,13 @@ import java.util.concurrent.ConcurrentHashMap;
  * <ul>
  *   <li>{@code nodes} — 正在处理该 key 的节点集合(用于 S 型/串行模式去重)</li>
  *   <li>{@code hasSType} — 是否有 S 型子命令(影响并发豁免判定)</li>
- *   <li>{@code mainCommandId} — S 型子命令关联的主命令 ID(extraInfo)</li>
  *   <li>{@code nodeMainIds} — 节点 → 该节点上正在处理的主命令 ID 集合
  *       (主命令记自身 ID;S 型记其 extraInfo;用于同主 S 型豁免)</li>
  * </ul>
+ *
+ * <p>注意:原来有单独的 {@code mainCommandId} 单值字段,但由于同一 key 下可能
+ * 有多个主命令的 S 子命令并发处理,单值字段会被覆盖。改为统一从 {@code nodeMainIds}
+ * 跨节点查询,避免覆盖问题。
  */
 @Data
 public class CommandProcessingTracker {
@@ -29,9 +32,6 @@ public class CommandProcessingTracker {
 
     /** 是否有 S 型子命令 */
     private boolean hasSType = false;
-
-    /** 主命令 ID(S 型子命令时关联到主命令) */
-    private String mainCommandId = null;
 
     /** 节点 → 该节点上正在处理的主命令 ID 集合 */
     private final Map<String, Set<String>> nodeMainIds = new ConcurrentHashMap<>();
@@ -63,5 +63,17 @@ public class CommandProcessingTracker {
         }
         Set<String> set = nodeMainIds.get(nodeId);
         return set != null && set.contains(mainId);
+    }
+
+    /**
+     * 判断是否有任意节点正在处理指定主命令。
+     * 替代原来的单值 {@code mainCommandId} 字段,避免多条 S 子命令覆盖问题。
+     */
+    public boolean hasMainCommandId(String mainId) {
+        if (mainId == null) return false;
+        for (Set<String> ids : nodeMainIds.values()) {
+            if (ids.contains(mainId)) return true;
+        }
+        return false;
     }
 }

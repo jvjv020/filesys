@@ -52,7 +52,8 @@ public class MergeFlowService {
     private final ConverterFactory converterFactory;
     private final FieldMappingBuilder fieldMappingBuilder;
 
-    private volatile boolean abortRequested = false;
+    /** 每命令的终止标志 — 避免多命令间共享 volatile 字段造成误中断 */
+    private final ConcurrentHashMap<Long, Boolean> abortFlags = new ConcurrentHashMap<>();
 
     /**
      * 启动异步合并流程。
@@ -62,6 +63,7 @@ public class MergeFlowService {
      * @param baseFileInfo  基础文件路径(已解析)
      */
     public void startMergeAsync(Long mainCommandId, TransferConfig config, ResolvedPath baseFileInfo) {
+        abortFlags.put(mainCommandId, false);
         CompletableFuture.runAsync(() -> {
             LogUtils.setTaskId(mainCommandId);
             try {
@@ -75,6 +77,8 @@ public class MergeFlowService {
                 log.info("Merge flow completed for command: {}", mainCommandId);
             } catch (Exception e) {
                 log.error("Merge flow failed for command {}: {}", mainCommandId, e.getMessage(), e);
+            } finally {
+                abortFlags.remove(mainCommandId);
             }
         });
     }
@@ -96,7 +100,7 @@ public class MergeFlowService {
         boolean headerWritten = false;
 
         while (true) {
-            if (abortRequested) break;
+            if (isAborted(mainCommandId)) break;
 
             // 检查 E 桶 → 终止
             if (hasErrorBuckets(mainCommandId)) {
@@ -149,7 +153,7 @@ public class MergeFlowService {
         Set<String> finalizedTargets = ConcurrentHashMap.newKeySet();
 
         while (true) {
-            if (abortRequested) break;
+            if (isAborted(mainCommandId)) break;
 
             if (hasErrorBuckets(mainCommandId)) {
                 failRemaining(mainCommandId);
@@ -376,7 +380,7 @@ public class MergeFlowService {
 
     /** 终止合并:标记未处理桶为跳过 */
     private void failRemaining(Long cmdId) {
-        abortRequested = true;
+        abortFlags.put(cmdId, true);
         int n = detailRepository.batchUpdateStatus(cmdId, ColumnNames.STATUS_EMPTY, ColumnNames.STATUS_SKIPPED);
         log.warn("Merge[{}] abort, skipped {} buckets", cmdId, n);
         updateMainStatus(cmdId, ColumnNames.STATUS_ERROR);
@@ -398,6 +402,11 @@ public class MergeFlowService {
             template = template.replace("{" + names[i].trim() + "}", values[i].trim());
         }
         return template;
+    }
+
+    /** 检查该命令是否被标记为终止 */
+    private boolean isAborted(Long cmdId) {
+        return Boolean.TRUE.equals(abortFlags.get(cmdId));
     }
 
     private static void safeSleep(long ms) {
