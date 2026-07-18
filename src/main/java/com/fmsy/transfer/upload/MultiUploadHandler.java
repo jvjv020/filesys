@@ -252,14 +252,41 @@ public class MultiUploadHandler implements TransferHandler {
      * </p>
      *
      * @param allFiles    FTP 目录列表全部文件
-     * @param flagPattern 标志文件名模式（如 {@code {stem}.ok}）
+     * @param flagPattern 标志文件名模式（如 {@code {stem}.ok}），null 表示无 flag 模式
      * @return 有效数据文件（有对应标志文件的数据文件）列表
      */
     List<String> prescanDataFiles(String[] allFiles, String flagPattern) {
+        return prescanDataFiles(allFiles, flagPattern, null);
+    }
+
+    /**
+     * 预扫描：用正则从文件列表中分离出标志文件，再交叉筛选有效数据文件。
+     *
+     * <p>当 {@code flagPattern} 为 null（无 flag 模式）时，使用 {@code listRegex}
+     * 过滤文件列表，只保留匹配数据文件命名模式的文件。
+     * </p>
+     * </p>
+     *
+     * @param allFiles    FTP 目录列表全部文件
+     * @param flagPattern 标志文件名模式，null 表示无 flag 模式
+     * @param listRegex   数据文件命名正则（无 flag 模式时使用，用于过滤额外文件）
+     * @return 有效数据文件列表
+     */
+    List<String> prescanDataFiles(String[] allFiles, String flagPattern, Pattern listRegex) {
         if (allFiles == null || allFiles.length == 0)
             return List.of();
         if (flagPattern == null) {
-            return new ArrayList<>(List.of(allFiles));
+            // 无 flag 模式：用 glob 正则过滤，只保留匹配数据文件命名模式的文件
+            if (listRegex == null) {
+                return new ArrayList<>(List.of(allFiles));
+            }
+            List<String> filtered = new ArrayList<>();
+            for (String f : allFiles) {
+                if (listRegex.matcher(ResolvedPath.of(f).name()).matches()) {
+                    filtered.add(f);
+                }
+            }
+            return filtered;
         }
 
         Pattern flagRegex = toFlagRegex(flagPattern);
@@ -311,6 +338,35 @@ public class MultiUploadHandler implements TransferHandler {
     }
 
     /**
+     * 将 glob 通配符模式转为正则，用于无 flag 模式时对数据文件做二次过滤。
+     * <p>
+     * 示例：{@code BR*.csv} → {@code ^BR[^/]*\.csv$}
+     * </p>
+     */
+    static Pattern globToRegex(String glob) {
+        if (glob == null) return null;
+        // 提取文件名部分（glob 通常是完整路径，如 /data/BR*.csv）
+        int lastSlash = glob.lastIndexOf('/');
+        String pattern = lastSlash >= 0 ? glob.substring(lastSlash + 1) : glob;
+        // 若去掉目录后无通配符，说明 listPattern 不含 {FILE_NAME} 占位符，无需过滤
+        if (pattern.isEmpty()) return null;
+
+        StringBuilder sb = new StringBuilder("^");
+        for (int i = 0; i < pattern.length(); i++) {
+            char c = pattern.charAt(i);
+            if (c == '*') {
+                sb.append("[^/]*");
+            } else if (c == '?') {
+                sb.append("[^/]");
+            } else {
+                sb.append(Pattern.quote(String.valueOf(c)));
+            }
+        }
+        sb.append("$");
+        return Pattern.compile(sb.toString());
+    }
+
+    /**
      * 单次 FTP 连接内完成：文件列表 + 标志检查 + 异常文件处理。
      *
      * <p>
@@ -331,13 +387,11 @@ public class MultiUploadHandler implements TransferHandler {
             if (allFiles.length == 0) return List.of();
 
             String flagPattern = UploadSupport.extractFlagPathPattern(config.getPreOperations());
-            if (flagPattern == null) {
-                log.info("Prescan: {} files (no flag pattern)", allFiles.length);
-                return new ArrayList<>(List.of(allFiles));
-            }
 
-            // Phase A: prescanDataFiles 过滤有效数据文件（含标志文件过滤和无标志告警）
-            List<String> validFiles = prescanDataFiles(allFiles, flagPattern);
+            // Phase A: prescanDataFiles 过滤有效数据文件
+            // 无 flag 模式时，用 listPattern 转正则做二次过滤，排除 FTP 返回的额外文件
+            Pattern listRegex = flagPattern == null ? globToRegex(listPattern) : null;
+            List<String> validFiles = prescanDataFiles(allFiles, flagPattern, listRegex);
 
             // Phase B: 孤立标志文件迁移到 error 目录
             moveOrphanedFlagFiles(client, allFiles, flagPattern, validFiles);
