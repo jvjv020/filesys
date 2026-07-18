@@ -265,7 +265,6 @@ public class MultiUploadHandler implements TransferHandler {
      * <p>当 {@code flagPattern} 为 null（无 flag 模式）时，使用 {@code listRegex}
      * 过滤文件列表，只保留匹配数据文件命名模式的文件。
      * </p>
-     * </p>
      *
      * @param allFiles    FTP 目录列表全部文件
      * @param flagPattern 标志文件名模式，null 表示无 flag 模式
@@ -301,6 +300,12 @@ public class MultiUploadHandler implements TransferHandler {
             } else {
                 candidateDataFiles.add(f);
             }
+        }
+
+        // Step 1.5: 候选数据文件也需匹配数据文件命名模式，过滤掉额外文件
+        if (listRegex != null) {
+            candidateDataFiles.removeIf(f ->
+                    !listRegex.matcher(ResolvedPath.of(f).name()).matches());
         }
 
         // Step 2: 交叉筛选——有对应标志的数据文件有效，无标志的告警跳过
@@ -389,8 +394,8 @@ public class MultiUploadHandler implements TransferHandler {
             String flagPattern = UploadSupport.extractFlagPathPattern(config.getPreOperations());
 
             // Phase A: prescanDataFiles 过滤有效数据文件
-            // 无 flag 模式时，用 listPattern 转正则做二次过滤，排除 FTP 返回的额外文件
-            Pattern listRegex = flagPattern == null ? globToRegex(listPattern) : null;
+            // 用 listPattern 转正则做二次过滤，排除 FTP 返回的额外文件
+            Pattern listRegex = globToRegex(listPattern);
             List<String> validFiles = prescanDataFiles(allFiles, flagPattern, listRegex);
 
             // Phase B: 孤立标志文件迁移到 error 目录
