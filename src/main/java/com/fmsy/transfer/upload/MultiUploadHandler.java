@@ -18,8 +18,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -293,11 +295,13 @@ public class MultiUploadHandler implements TransferHandler {
 
         // Step 1: 用正则分离标志文件 和 候选数据文件
         Set<String> flagNames = new HashSet<>();
+        Map<String, String> flagFilePaths = new HashMap<>();
         List<String> candidateDataFiles = new ArrayList<>();
         for (String f : allFiles) {
             String name = ResolvedPath.of(f).name();
             if (flagRegex.matcher(name).matches()) {
                 flagNames.add(name);
+                flagFilePaths.put(name, f);
             } else {
                 candidateDataFiles.add(f);
             }
@@ -324,9 +328,31 @@ public class MultiUploadHandler implements TransferHandler {
             }
         }
 
-        // Step 3: 孤立标志文件迁移
+        // Step 3: 孤立标志文件迁移（flagNames 中不在预期集合内的即为孤立标志）
         if (client != null) {
-            moveOrphanedFlagFiles(client, allFiles, flagPattern, validDataFiles);
+            Set<String> expectedFlagNames = new HashSet<>();
+            for (String f : validDataFiles) {
+                String expected = resolveFlagName(flagPattern, ResolvedPath.of(f));
+                if (expected != null) {
+                    expectedFlagNames.add(fileNameOnly(expected));
+                }
+            }
+            int orphanedCount = 0;
+            for (String name : flagNames) {
+                if (!expectedFlagNames.contains(name)) {
+                    String fullPath = flagFilePaths.get(name);
+                    log.warn("Orphaned flag file, moving to error: {}", fullPath);
+                    try {
+                        client.moveToErrorDir(fullPath);
+                        orphanedCount++;
+                    } catch (Exception e) {
+                        log.error("Failed to move orphaned flag to error: {}", fullPath, e);
+                    }
+                }
+            }
+            if (orphanedCount > 0) {
+                log.info("Moved {} orphaned flag(s) to error dir", orphanedCount);
+            }
         }
         return validDataFiles;
     }
@@ -405,50 +431,6 @@ public class MultiUploadHandler implements TransferHandler {
             log.info("Prescan result: {} valid files (pattern: {})", validFiles.size(), listPattern);
             return validFiles;
         });
-    }
-
-    /**
-     * 扫描孤立标志文件并迁移到 error 目录。
-     *
-     * <p>
-     * 用正则匹配定位标志文件，然后检查是否在有效数据文件对应的期望标志集合中。
-     * 不在则视为孤立标志文件，迁移到 error 目录。
-     * </p>
-     */
-    private void moveOrphanedFlagFiles(FtpClient client, String[] allFiles,
-            String flagPattern, List<String> validDataFiles) throws Exception {
-        Pattern flagRegex = toFlagRegex(flagPattern);
-        if (flagRegex == null) return;
-
-        // Step 1: 收集有效数据文件对应的期望标志文件名
-        Set<String> expectedFlagNames = new HashSet<>();
-        for (String f : validDataFiles) {
-            String expected = resolveFlagName(flagPattern, ResolvedPath.of(f));
-            if (expected != null) {
-                expectedFlagNames.add(fileNameOnly(expected));
-            }
-        }
-
-        // Step 2: 用正则定位标志文件，不在期望集合中的为孤立标志
-        int orphanedCount = 0;
-        for (String file : allFiles) {
-            String name = ResolvedPath.of(file).name();
-            if (!flagRegex.matcher(name).matches()) continue; // 不是标志文件
-
-            if (!expectedFlagNames.contains(name)) {
-                log.warn("Orphaned flag file, moving to error: {}", file);
-                try {
-                    client.moveToErrorDir(file);
-                    orphanedCount++;
-                } catch (Exception e) {
-                    log.error("Failed to move orphaned flag to error: {}", file, e);
-                }
-            }
-        }
-
-        if (orphanedCount > 0) {
-            log.info("Moved {} orphaned flag(s) to error dir", orphanedCount);
-        }
     }
 
     // ==================== 通用工具 ====================
