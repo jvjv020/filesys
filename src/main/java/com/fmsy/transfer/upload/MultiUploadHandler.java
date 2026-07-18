@@ -277,50 +277,40 @@ public class MultiUploadHandler implements TransferHandler {
     List<String> prescanDataFiles(String[] allFiles, String flagPattern, Pattern listRegex, FtpClient client) {
         if (allFiles == null || allFiles.length == 0)
             return List.of();
+
+        // Step 1: 数据文件正则过滤——只保留匹配数据文件命名模式的文件
+        List<String> dataFiles = new ArrayList<>();
+        for (String f : allFiles) {
+            if (listRegex == null || listRegex.matcher(ResolvedPath.of(f).name()).matches()) {
+                dataFiles.add(f);
+            }
+        }
         if (flagPattern == null) {
-            // 无 flag 模式：用 glob 正则过滤，只保留匹配数据文件命名模式的文件
-            if (listRegex == null) {
-                return new ArrayList<>(List.of(allFiles));
-            }
-            List<String> filtered = new ArrayList<>();
-            for (String f : allFiles) {
-                if (listRegex.matcher(ResolvedPath.of(f).name()).matches()) {
-                    filtered.add(f);
-                }
-            }
-            return filtered;
+            return dataFiles; // 无 flag 模式，数据文件即为有效
         }
 
+        // Step 2: 标志文件正则过滤——从 allFiles 中筛选出标志文件
         Pattern flagRegex = toFlagRegex(flagPattern);
-
-        // Step 1: 用正则分离标志文件 和 候选数据文件
         Set<String> flagNames = new HashSet<>();
         Map<String, String> flagFilePaths = new HashMap<>();
-        List<String> candidateDataFiles = new ArrayList<>();
         for (String f : allFiles) {
             String name = ResolvedPath.of(f).name();
             if (flagRegex.matcher(name).matches()) {
                 flagNames.add(name);
                 flagFilePaths.put(name, f);
-            } else {
-                candidateDataFiles.add(f);
             }
         }
+        // 从数据文件列表中排除标志文件（避免将标志文件本身当作数据文件处理）
+        dataFiles.removeIf(f -> flagNames.contains(ResolvedPath.of(f).name()));
 
-        // Step 1.5: 候选数据文件也需匹配数据文件命名模式，过滤掉额外文件
-        if (listRegex != null) {
-            candidateDataFiles.removeIf(f ->
-                    !listRegex.matcher(ResolvedPath.of(f).name()).matches());
-        }
-
-        // Step 2: 交叉筛选——有对应标志的数据文件有效，无标志的告警跳过
+        // Step 3: 遍历数据文件列表，有对应标志的列为有效并从标志集合中删除
         List<String> validDataFiles = new ArrayList<>();
-        for (String f : candidateDataFiles) {
+        for (String f : dataFiles) {
             ResolvedPath fileInfo = ResolvedPath.of(f);
             String expectedFlagName = resolveFlagName(flagPattern, fileInfo);
             String expectedFlagFileName = fileNameOnly(expectedFlagName);
 
-            if (flagNames.contains(expectedFlagFileName)) {
+            if (flagNames.remove(expectedFlagFileName)) {
                 validDataFiles.add(f);
             } else {
                 log.warn("Data file {} has no corresponding flag file (expected: {}), skipping",
@@ -328,26 +318,17 @@ public class MultiUploadHandler implements TransferHandler {
             }
         }
 
-        // Step 3: 孤立标志文件迁移（flagNames 中不在预期集合内的即为孤立标志）
+        // Step 4: 标志文件列表中还存留的即为孤立标志（无对应数据文件），迁移到 error
         if (client != null) {
-            Set<String> expectedFlagNames = new HashSet<>();
-            for (String f : validDataFiles) {
-                String expected = resolveFlagName(flagPattern, ResolvedPath.of(f));
-                if (expected != null) {
-                    expectedFlagNames.add(fileNameOnly(expected));
-                }
-            }
             int orphanedCount = 0;
             for (String name : flagNames) {
-                if (!expectedFlagNames.contains(name)) {
-                    String fullPath = flagFilePaths.get(name);
-                    log.warn("Orphaned flag file, moving to error: {}", fullPath);
-                    try {
-                        client.moveToErrorDir(fullPath);
-                        orphanedCount++;
-                    } catch (Exception e) {
-                        log.error("Failed to move orphaned flag to error: {}", fullPath, e);
-                    }
+                String fullPath = flagFilePaths.get(name);
+                log.warn("Orphaned flag file, moving to error: {}", fullPath);
+                try {
+                    client.moveToErrorDir(fullPath);
+                    orphanedCount++;
+                } catch (Exception e) {
+                    log.error("Failed to move orphaned flag to error: {}", fullPath, e);
                 }
             }
             if (orphanedCount > 0) {
