@@ -1,6 +1,6 @@
 package com.fmsy.transfer.upload;
 
-import com.fmsy.exception.FlagCheckException;
+import com.fmsy.fileops.FlagFileService;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.model.Command;
 import com.fmsy.model.FieldMapping;
@@ -156,39 +156,15 @@ public class MultiUploadHandler implements TransferHandler {
      *
      * @param mapping    预构建的 FieldMapping（所有文件共享，避免重复构建）
      * @param auditCount 稽核数（SERIAL 模式传 null）
-     * @return 成功插入的记录数
+     * @return 成功插入的记录数；TASK_FAIL 表示失败
      */
     private Integer insertSingleFile(String ftpName, String filePath, ResolvedPath fileInfo,
             TransferConfig config, FieldMapping mapping, Integer auditCount) {
-        try {
-            return transferSupport.executeWithClient(ftpName, client -> {
-                // Phase 1: preCheck — 标志文件检查（含 FLAG 内容比对）
-                UploadSupport.UploadResult checkResult = support.preCheck(client, config, fileInfo, filePath);
-                if (checkResult != null) {
-                    log.warn("Pre-check failed for {}, skipping", filePath);
-                    return 0;
-                }
-
-                // Phase 2: 落库 + 前后审计（单事务），使用预构建的 FieldMapping（避免重复查表元数据）
-                int count = support.insertDataAndVerify(client, config, mapping, filePath, auditCount);
-
-                // Phase 3: 文件级后操作
-                support.postProcess(client, config, fileInfo, count);
-
-                log.info("Uploaded file: {} ({} records)", filePath, count);
-                return count;
-            });
-        } catch (FlagCheckException e) {
-            // FLAG 比对失败 → 迁文件到 error 目录
-            log.warn("FLAG check failed, moving to error: {}", filePath);
-            support.moveDataAndFlagToErrorDir(ftpName, filePath, config);
-            return TASK_FAIL;
-        } catch (Exception e) {
-            // 前稽核/后审计或其他异常 → 迁文件到 error 目录，文件级事务已自行回滚
-            log.error("Insert failed for {}, moving to error: {}", filePath, e.getMessage());
-            support.moveDataAndFlagToErrorDir(ftpName, filePath, config);
-            return TASK_FAIL;
-        }
+        var r = support.safeExecuteFilePipeline(
+                ftpName, filePath, fileInfo, config,
+                mapping, null, auditCount);
+        if (ColumnNames.STATUS_ERROR.equals(r.status())) return TASK_FAIL;
+        return r.records(); // 0 for SKIPPED, >0 for SUCCESS
     }
 
     // ==================== 预扫描工具 ====================
@@ -307,7 +283,8 @@ public class MultiUploadHandler implements TransferHandler {
         for (String f : dataFiles) {
             ResolvedPath fileInfo = ResolvedPath.of(f);
             String expectedFlagName = resolveFlagName(flagPattern, fileInfo);
-            String expectedFlagFileName = fileNameOnly(expectedFlagName);
+            String expectedFlagFileName = ResolvedPath.of(expectedFlagName) != null
+                    ? ResolvedPath.of(expectedFlagName).name() : null;
 
             if (flagNames.remove(expectedFlagFileName)) {
                 validDataFiles.add(f);
@@ -341,17 +318,7 @@ public class MultiUploadHandler implements TransferHandler {
         if (flagPattern == null || fileInfo == null)
             return null;
         String resolved = TransferSupport.expandPathVariables(flagPattern, fileInfo);
-        if (!resolved.startsWith("/") && fileInfo.dir() != null && !fileInfo.dir().isEmpty()) {
-            resolved = fileInfo.dir() + "/" + resolved;
-        }
-        return resolved;
-    }
-
-    private static String fileNameOnly(String path) {
-        if (path == null)
-            return null;
-        int slash = path.lastIndexOf('/');
-        return slash >= 0 ? path.substring(slash + 1) : path;
+        return fileInfo.resolveRelative(resolved);
     }
 
     /**
@@ -402,7 +369,7 @@ public class MultiUploadHandler implements TransferHandler {
             if (allFiles == null) return null;
             if (allFiles.length == 0) return List.of();
 
-            String flagPattern = UploadSupport.extractFlagPathPattern(config.getPreOperations());
+            String flagPattern = FlagFileService.extractFlagPathPattern(config.getPreOperations());
 
             // 统一走 prescanDataFiles 筛选有效数据文件 + 孤立标志文件迁移
             Pattern listRegex = globToRegex(listPattern);

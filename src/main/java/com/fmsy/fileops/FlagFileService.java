@@ -2,6 +2,7 @@ package com.fmsy.fileops;
 
 import com.fmsy.exception.FlagCheckException;
 import com.fmsy.ftp.FtpClient;
+import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.ResolvedPath;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -366,6 +367,38 @@ public class FlagFileService {
         return sb.length() == 0 ? null : sb.toString();
     }
 
+    /**
+     * 从前置操作字符串中提取第一个 FLAG/READY 路径模式（不含 mode 后缀）。
+     *
+     * <p>
+     * 例如 {@code "FLAG:{stem}.OK;L,READY:other.txt"} → {@code "{stem}.OK"}。
+     * 只提取路径模式字符串，不展开文件变量。需要展开时组合使用 {@link #resolvePath(String, ResolvedPath)}。
+     * </p>
+     *
+     * @param preOps 前置操作字符串，逗号分隔
+     * @return 第一个 FLAG/READY 路径模式；无匹配时返回 null
+     */
+    public static String extractFlagPathPattern(String preOps) {
+        if (preOps == null || preOps.isEmpty())
+            return null;
+        for (String op : preOps.split(",")) {
+            op = op.trim();
+            String pathPart;
+            if (op.startsWith("FLAG:")) {
+                pathPart = op.substring(5).trim();
+            } else if (op.startsWith("READY:")) {
+                pathPart = op.substring(6).trim();
+            } else {
+                continue;
+            }
+            if (pathPart.isEmpty())
+                continue;
+            int semicolon = pathPart.indexOf(';');
+            return semicolon > 0 ? pathPart.substring(0, semicolon).trim() : pathPart;
+        }
+        return null;
+    }
+
     // ==================== 模式码引擎 ====================
 
     /**
@@ -435,21 +468,10 @@ public class FlagFileService {
 
         /**
          * 仅替换路径变量（{stem}/{name}/{ext}/{dir}/{dn}/{up}），不做模式码展开。
-         * 用于操作路径中的变量替换。
+         * 用于操作路径中的变量替换。委托给 {@link TransferSupport#expandPathVariables}。
          */
         String expandPathVariables(String template, ResolvedPath fileInfo) {
-            if (template == null || fileInfo == null) return template;
-            return template
-                    .replace("{stem}", nullToEmpty(fileInfo.stem()))
-                    .replace("{name}", nullToEmpty(fileInfo.name()))
-                    .replace("{ext}", nullToEmpty(fileInfo.ext()))
-                    .replace("{dir}", nullToEmpty(fileInfo.dir()))
-                    .replace("{dn}", nullToEmpty(fileInfo.dn()))
-                    .replace("{up}", nullToEmpty(fileInfo.up()));
-        }
-
-        private String nullToEmpty(String s) {
-            return s == null ? "" : s;
+            return TransferSupport.expandPathVariables(template, fileInfo);
         }
 
         private String resolveCode(String code, ResolvedPath fileInfo,

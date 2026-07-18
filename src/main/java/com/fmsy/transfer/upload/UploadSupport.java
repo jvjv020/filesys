@@ -5,6 +5,7 @@ import com.fmsy.converter.CloseableIterator;
 import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
 import com.fmsy.exception.FlagCheckException;
+import com.fmsy.fileops.FlagFileService;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.FieldMapping;
@@ -193,6 +194,86 @@ public class UploadSupport {
         }
     }
 
+    // ==================== 单文件上传管线（跨 Handler 复用） ====================
+
+    /**
+     * 单文件上传管线 — preCheck → insertDataAndVerify → postProcess。
+     *
+     * <p>
+     * 不包含 truncateTable（由调用方在适当时机执行）。
+     * mapping 和 detailContext 二选一：
+     * <ul>
+     *   <li>mapping != null — 使用预构建的 FieldMapping（多文件并行场景）</li>
+     *   <li>detailContext != null — 使用明细行上下文构建 FieldMapping（BATCH 场景）</li>
+     *   <li>两者都 null — 自动构建 FieldMapping（SERIAL 单文件场景）</li>
+     * </ul>
+     *
+     * @param client        已借出的 FTP 客户端
+     * @param config        传输配置
+     * @param fileInfo      数据文件路径信息
+     * @param filePath      数据文件完整路径
+     * @param mapping       预构建的 FieldMapping（可为 null）
+     * @param detailContext 明细上下文（可为 null）
+     * @param auditCount    稽核数（可为 null）
+     * @return 上传结果
+     */
+    public UploadResult executeFilePipeline(FtpClient client, TransferConfig config,
+            ResolvedPath fileInfo, String filePath,
+            FieldMapping mapping, Map<String, Object> detailContext,
+            Integer auditCount) {
+
+        // Phase 1: preCheck
+        UploadResult checkResult = preCheck(client, config, fileInfo, filePath);
+        if (checkResult != null) return checkResult;
+
+        // Phase 2: insert + verify
+        int count = (mapping != null)
+                ? insertDataAndVerify(client, config, mapping, filePath, auditCount)
+                : insertDataAndVerify(client, config, fileInfo, detailContext, filePath, auditCount);
+
+        // Phase 3: postProcess
+        postProcess(client, config, fileInfo, count);
+
+        return new UploadResult(count, 1, 0, 0, null);
+    }
+
+    /**
+     * 安全版上传管线 — 自动管理 FTP 连接生命周期 + 异常时迁移文件到 error 目录。
+     *
+     * <p>
+     * 返回 UploadResult 而非抛出异常，调用方根据 status 判断：
+     * <ul>
+     *   <li>status=null — 成功</li>
+     *   <li>status=SKIPPED — preCheck 未通过（标志文件不存在）</li>
+     *   <li>status=ERROR — 异常，文件已迁移到 error 目录</li>
+     * </ul>
+     *
+     * @param ftpName       FTP 连接名
+     * @param filePath      数据文件完整路径
+     * @param fileInfo      数据文件路径信息
+     * @param config        传输配置
+     * @param mapping       预构建的 FieldMapping（可为 null）
+     * @param detailContext 明细上下文（可为 null）
+     * @param auditCount    稽核数（可为 null）
+     * @return 上传结果
+     */
+    public UploadResult safeExecuteFilePipeline(String ftpName, String filePath,
+            ResolvedPath fileInfo, TransferConfig config,
+            FieldMapping mapping, Map<String, Object> detailContext,
+            Integer auditCount) {
+        try {
+            return transferSupport.executeWithClient(ftpName, client ->
+                    executeFilePipeline(client, config, fileInfo, filePath,
+                            mapping, detailContext, auditCount));
+        } catch (FlagCheckException e) {
+            moveDataAndFlagToErrorDir(ftpName, filePath, config);
+            return new UploadResult(0, 0, 0, 1, ColumnNames.STATUS_ERROR);
+        } catch (RuntimeException e) {
+            moveDataAndFlagToErrorDir(ftpName, filePath, config);
+            return new UploadResult(0, 0, 0, 1, ColumnNames.STATUS_ERROR);
+        }
+    }
+
     // ==================== 后审计 ====================
 
     /**
@@ -369,39 +450,15 @@ public class UploadSupport {
     // ==================== 标志文件路径解析工具 ====================
 
     /**
-     * 从前置操作字符串中提取第一个 FLAG/READY 路径模式（不含 mode 后缀）。
-     *
-     * <p>
-     * 例如 {@code "FLAG:{stem}.OK;L,READY:other.txt"} → {@code "{stem}.OK"}。
-     * 只提取路径模式字符串，不展开文件变量。需要展开时组合使用 {@link #resolveConfiguredFlagPath}。
-     * </p>
-     *
-     * @param preOps 前置操作字符串（逗号分隔）
-     * @return 第一个 FLAG/READY 路径模式；无匹配时返回 null
+     * 从前置操作字符串中提取第一个 FLAG/READY 路径模式。
+     * 委托给 {@link FlagFileService#extractFlagPathPattern}。
      */
     public static String extractFlagPathPattern(String preOps) {
-        if (preOps == null || preOps.isEmpty())
-            return null;
-        for (String op : preOps.split(",")) {
-            op = op.trim();
-            String pathPart;
-            if (op.startsWith("FLAG:")) {
-                pathPart = op.substring(5).trim();
-            } else if (op.startsWith("READY:")) {
-                pathPart = op.substring(6).trim();
-            } else {
-                continue;
-            }
-            if (pathPart.isEmpty())
-                continue;
-            int semicolon = pathPart.indexOf(';');
-            return semicolon > 0 ? pathPart.substring(0, semicolon).trim() : pathPart;
-        }
-        return null;
+        return FlagFileService.extractFlagPathPattern(preOps);
     }
 
     /**
-     * 从传输配置的前置操作中提取标志文件的路径。
+     * 从传输配置的前置操作中提取标志文件的完整路径。
      *
      * <p>
      * 解析 preOperations 字符串，找到第一个 FLAG 或 READY 操作，提取路径模式
@@ -414,12 +471,12 @@ public class UploadSupport {
     public static String resolveConfiguredFlagPath(String preOps, ResolvedPath fileInfo) {
         if (fileInfo == null)
             return null;
-        String pathPattern = extractFlagPathPattern(preOps);
+        String pathPattern = FlagFileService.extractFlagPathPattern(preOps);
         if (pathPattern == null)
             return null;
 
         // 展开文件衍生变量
-        String resolved = expandPathVariables(pathPattern, fileInfo);
+        String resolved = TransferSupport.expandPathVariables(pathPattern, fileInfo);
 
         // 相对路径 → 继承数据文件的目录
         if (!resolved.startsWith("/") && fileInfo.dir() != null && !fileInfo.dir().isEmpty()) {
@@ -427,33 +484,7 @@ public class UploadSupport {
         }
 
         // 规范化 .. 段
-        return normalizePathSlashes(resolved);
-    }
-
-    /**
-     * 替换路径模板中的文件衍生变量 — 委托给 {@link TransferSupport#expandPathVariables}。
-     */
-    private static String expandPathVariables(String template, ResolvedPath fileInfo) {
-        return TransferSupport.expandPathVariables(template, fileInfo);
-    }
-
-    /**
-     * 规范化路径中的 ".." 段。
-     */
-    static String normalizePathSlashes(String path) {
-        if (path == null || !path.contains(".."))
-            return path;
-        String[] segments = path.split("/");
-        ArrayList<String> result = new ArrayList<>();
-        for (String seg : segments) {
-            if ("..".equals(seg)) {
-                if (!result.isEmpty())
-                    result.remove(result.size() - 1);
-            } else if (!seg.isEmpty()) {
-                result.add(seg);
-            }
-        }
-        return "/" + String.join("/", result);
+        return FlagFileService.normalizePath(resolved);
     }
 
     // ==================== 跨场景主状态判定 ====================

@@ -1,12 +1,10 @@
 package com.fmsy.transfer.upload;
 
 import com.fmsy.enums.CommandType;
-import com.fmsy.exception.FlagCheckException;
 import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.DetailRepository;
-import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.BooleanUtils;
@@ -48,7 +46,6 @@ public class SingleUploadHandler implements TransferHandler {
     private final DetailRepository detailRepository;
     private final UploadSupport support;
     private final TransferSupport transferSupport;
-    private final FieldMappingBuilder fieldMappingBuilder;
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
@@ -63,57 +60,24 @@ public class SingleUploadHandler implements TransferHandler {
      * UPLOAD_SINGLE（SERIAL）模式：从配置路径直接解析文件并上传，
      * 走 preCheck → truncateTable → insertDataAndVerify → postProcess 管线。
      */
-    private void handleSingle(Command command, TransferConfig config, Result result) throws Exception {
+    private void handleSingle(Command command, TransferConfig config, Result result) {
         ResolvedPath fileInfo = transferSupport.resolveFilePath(config.getFilePath(), command);
         String filePath = fileInfo.fullPath();
-        String ftpName = config.getFtpName();
-        Integer auditCount = command.getAuditCount();
 
-        try {
-            // 在 FTP 连接上下文中执行 preCheck → insertDataAndVerify → postProcess
-            // 前稽核与后审计已合并到 insertDataAndVerify 中，在落库后统一校验
-            UploadSupport.UploadResult r = transferSupport.executeWithClient(ftpName, client -> {
-                // Phase 1: preCheck — 标志文件检查
-                UploadSupport.UploadResult checkResult = support.preCheck(client, config, fileInfo, filePath);
-                if (checkResult != null) {
-                    return checkResult; // SKIPPED
-                }
-
-                // Phase 2: 清表 — 落库之前
-                if (BooleanUtils.isYes(config.getClearTableFlag())) {
-                    support.truncateTable(config);
-                }
-
-                // Phase 3: insert + 前后审计（单事务）
-                // 前稽核与后审计使用 CloseableIterator.getRecordCount() 统一校验
-                int count = support.insertDataAndVerify(client, config, fileInfo, null, filePath, auditCount);
-
-                // Phase 5: postProcess — FTP 后操作
-                support.postProcess(client, config, fileInfo, count);
-
-                return new UploadSupport.UploadResult(count, 1, 0, 0, null);
-            });
-
-            // 根据结果设置结果表状态
-            if (ColumnNames.STATUS_SKIPPED.equals(r.status())) {
-                result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-check failed: flag not found");
-                return;
-            }
-            // status=null 表示成功
-            result.setOutcome(r.records(), ColumnNames.STATUS_SUCCESS, "");
-
-        } catch (FlagCheckException e) {
-            // FLAG 比对失败 → 迁文件到 error 目录
-            support.moveDataAndFlagToErrorDir(ftpName, filePath, config);
-            log.warn("FLAG check failed, data file: {}, detail: {}", filePath, e.getMessage());
-            result.setOutcome(0, ColumnNames.STATUS_ERROR, "FLAG check failed: " + e.getMessage());
-
-        } catch (RuntimeException e) {
-            // 前稽核/后审计失败 → 迁文件到 error 目录
-            support.moveDataAndFlagToErrorDir(ftpName, filePath, config);
-            log.error("Upload failed for {}: {}", filePath, e.getMessage());
-            result.setOutcome(0, ColumnNames.STATUS_ERROR, e.getMessage());
+        // 清表（在 FTP 连接外执行）
+        if (BooleanUtils.isYes(config.getClearTableFlag())) {
+            support.truncateTable(config);
         }
+
+        var r = support.safeExecuteFilePipeline(
+                config.getFtpName(), filePath, fileInfo, config,
+                null, null, command.getAuditCount());
+
+        if (r.status() != null) {
+            result.setOutcome(0, r.status(), "Upload " + r.status());
+            return;
+        }
+        result.setOutcome(r.records(), ColumnNames.STATUS_SUCCESS, "");
     }
 
     /**
@@ -128,8 +92,7 @@ public class SingleUploadHandler implements TransferHandler {
      * 明细表的 {@code FIELD_NAME/FIELD_VALUE} 通过 detailContext 参数
      * 传递给 insertDataAndVerify，内部自动构建包含 extraFields 的 FieldMapping。
      */
-    private void handleBatch(Command command, TransferConfig config, Result result) throws Exception {
-        String ftpName = config.getFtpName();
+    private void handleBatch(Command command, TransferConfig config, Result result) {
         String nodeId = config.getNodeId();
 
         // 1. 加载明细表，获取待处理文件
@@ -165,55 +128,22 @@ public class SingleUploadHandler implements TransferHandler {
                 ? ((Number) detail.get(ColumnNames.AUDIT_COUNT)).intValue()
                 : null;
 
-        try {
-            UploadSupport.UploadResult r = transferSupport.executeWithClient(ftpName, client -> {
-                // Phase 1: preCheck — 标志文件检查
-                UploadSupport.UploadResult checkResult = support.preCheck(client, config, fileInfo, filePath);
-                if (checkResult != null) {
-                    return checkResult; // SKIPPED
-                }
-
-                // Phase 2: 清表 — 落库之前
-                if (BooleanUtils.isYes(config.getClearTableFlag())) {
-                    support.truncateTable(config);
-                }
-
-                // Phase 3: insert + 前后审计（单事务）
-                // 将明细行作为 detailContext 传入，内部自动构建带 extraFields 的 FieldMapping
-                int count = support.insertDataAndVerify(
-                        client, config, fileInfo, detail, filePath, auditCount);
-
-                // Phase 4: postProcess — FTP 后操作
-                support.postProcess(client, config, fileInfo, count);
-
-                return new UploadSupport.UploadResult(count, 1, 0, 0, null);
-            });
-
-            // 根据结果更新明细状态和结果表
-            if (ColumnNames.STATUS_SKIPPED.equals(r.status())) {
-                // preCheck 失败时已在回调内更新明细状态为 SKIPPED
-                detailRepository.updateStatus(detailId, ColumnNames.STATUS_SKIPPED, nodeId);
-                result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-check failed: flag not found");
-                return;
-            }
-
-            // 成功：更新明细状态
-            detailRepository.updateStatus(detailId, ColumnNames.STATUS_SUCCESS, nodeId);
-            result.setOutcome(r.records(), ColumnNames.STATUS_SUCCESS, "");
-
-        } catch (FlagCheckException e) {
-            // FLAG 比对失败 → 迁文件 + 更新明细状态
-            detailRepository.updateStatus(detailId, ColumnNames.STATUS_ERROR, nodeId);
-            support.moveDataAndFlagToErrorDir(ftpName, filePath, config);
-            log.warn("FLAG check failed, data file: {}, detail: {}", filePath, e.getMessage());
-            result.setOutcome(0, ColumnNames.STATUS_ERROR, "FLAG check failed: " + e.getMessage());
-
-        } catch (RuntimeException e) {
-            // 其他异常 → 迁文件 + 更新明细状态
-            detailRepository.updateStatus(detailId, ColumnNames.STATUS_ERROR, nodeId);
-            support.moveDataAndFlagToErrorDir(ftpName, filePath, config);
-            log.error("Upload failed for {}: {}", filePath, e.getMessage());
-            result.setOutcome(0, ColumnNames.STATUS_ERROR, e.getMessage());
+        // 清表（在 FTP 连接外执行）
+        if (BooleanUtils.isYes(config.getClearTableFlag())) {
+            support.truncateTable(config);
         }
+
+        var r = support.safeExecuteFilePipeline(
+                config.getFtpName(), filePath, fileInfo, config,
+                null, detail, auditCount);
+
+        String status = r.status() != null ? r.status() : ColumnNames.STATUS_SUCCESS;
+        detailRepository.updateStatus(detailId, status, nodeId);
+
+        if (status != ColumnNames.STATUS_SUCCESS) {
+            result.setOutcome(0, status, "Upload " + status);
+            return;
+        }
+        result.setOutcome(r.records(), ColumnNames.STATUS_SUCCESS, "");
     }
 }
