@@ -71,40 +71,62 @@ public class MultiNodeDownloadHandler implements TransferHandler {
 
         // Phase 2: DB-only work (no FTP client held)
         CommandType commandType = command.getCommandType();
-        int childCount;
+        Long cmdId = command.getId();
         if (commandType == CommandType.BATCH) {
             // BATCH 模式:复用明细表已有桶,统计审计数后创建 S 子命令
-            childCount = bucketDistributor.prepareBatchChildren(command, config, baseFilePath, splitFields);
-        } else {
-            // SERIAL 模式:SplitFlowService 按 PK 范围切分桶(写入 specName 供子节点使用),
-            // 然后为所有空桶创建 S 型子命令
-            splitFlowService.splitSync(command.getId(), config);
-            childCount = bucketDistributor.createChildCommands(command.getId(),
-                    config.getCategoryCode(), config.getControlCode(), baseFilePath);
-        }
+            int childCount = bucketDistributor.prepareBatchChildren(command, config, baseFilePath, splitFields);
+            // BATCH 模式的桶已预先存在,prepareBatchChildren 完成后等价于"拆分完成",
+            // 标记 splitDone 使 MergeFlowService.isMergeDone 能正常退出
+            commandRepository.markSplitDone(command.getId());
 
-        if (childCount > 0) {
-            log.info("Created {} S-type child commands for command: {}", childCount, command.getId());
-            // Phase 3: 启动异步合并流程(轮询 Y 桶 → APPE 合并 → 写标志文件)
-            // onSuccess/onError 回调在此定义,指令表状态更新代码在 Handler 中可见,
-            // 便于排查异步流程的终态走向
-            Long cmdId = command.getId();
-            mergeFlowService.startMergeAsync(cmdId, config, baseFileInfo,
-                    // onSuccess: 合并成功,主命令终态置 Y
-                    () -> {
-                        commandRepository.updateStatus(cmdId, ColumnNames.STATUS_SUCCESS);
-                        log.info("Merge succeeded, main command {} status -> Y", cmdId);
-                    },
-                    // onError: 合并失败(如子节点报错),主命令终态置 E
-                    () -> {
-                        commandRepository.updateStatus(cmdId, ColumnNames.STATUS_ERROR);
-                        log.warn("Merge failed, main command {} status -> E", cmdId);
-                    }
-            );
-            log.info("Started merge flow for command: {}", command.getId());
-            result.markChildrenCreated();
+            if (childCount > 0) {
+                log.info("Created {} S-type child commands for command: {}", childCount, command.getId());
+                startMerge(cmdId, config, baseFileInfo);
+                result.markChildrenCreated();
+            } else {
+                result.markChildrenFailed("No buckets or child command creation returned 0");
+            }
         } else {
-            result.markChildrenFailed("No buckets or child command creation returned 0");
+            // SERIAL 模式:异步切分,不阻塞 Handler 线程
+            // 先标记结果状态为 P,让 orchestrator 写入 P 状态;
+            // 切分完成后在回调中创建子命令 + 启动合并
+            result.markChildrenCreated();
+            splitFlowService.startSplitAsync(cmdId, config,
+                    // onComplete: 切分完成 → 创建子命令 + 启动合并
+                    () -> {
+                        int cnt = bucketDistributor.createChildCommands(cmdId,
+                                config.getCategoryCode(), config.getControlCode(), baseFilePath);
+                        if (cnt > 0) {
+                            log.info("Split+child creation done for {}, {} child commands", cmdId, cnt);
+                            startMerge(cmdId, config, baseFileInfo);
+                        } else {
+                            log.warn("Split done but no buckets created for {}", cmdId);
+                            commandRepository.updateStatus(cmdId, ColumnNames.STATUS_SKIPPED);
+                        }
+                    },
+                    // onError: 切分失败 → 主命令置 E
+                    e -> commandRepository.updateStatus(cmdId, ColumnNames.STATUS_ERROR));
         }
+    }
+
+    /**
+     * 启动异步合并流程,onSuccess/onError 回调在此定义,指令表状态更新代码在 Handler 中可见,
+     * 便于排查异步流程的终态走向。
+     */
+    private void startMerge(Long cmdId, TransferConfig config, ResolvedPath baseFileInfo) {
+        mergeFlowService.startMergeAsync(cmdId, config, baseFileInfo,
+                // onSuccess: 合并成功,主命令终态置 Y
+                // 条件更新(P→Y):避免覆盖其他路径(如子命令失败)已写入的 E 状态
+                () -> {
+                    commandRepository.updateStatusIfProcessing(cmdId, ColumnNames.STATUS_SUCCESS);
+                    log.info("Merge succeeded, main command {} status -> Y", cmdId);
+                },
+                // onError: 合并失败(如子节点报错),主命令终态置 E
+                () -> {
+                    commandRepository.updateStatus(cmdId, ColumnNames.STATUS_ERROR);
+                    log.warn("Merge failed, main command {} status -> E", cmdId);
+                }
+        );
+        log.info("Started merge flow for command: {}", cmdId);
     }
 }

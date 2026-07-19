@@ -19,6 +19,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -132,6 +133,51 @@ public class TargetTableRepository {
         SqlStatement stmt = SqlBuilder.buildCountParametric(tableName, predicates, params);
         Integer count = getJdbc(dbName).queryForObject(stmt, Integer.class);
         return count != null ? count : 0;
+    }
+
+    /**
+     * 批量按桶 COUNT — 一次查询返回多个桶的计数。
+     * 单字段拆分时走 GROUP BY 优化,多字段拆分时回退到逐桶查询。
+     *
+     * @param dbName       数据库配置名
+     * @param tableName    目标表名
+     * @param splitField   拆分字段(单字段名或逗号分隔多字段)
+     * @param fieldValues  桶值列表(每个元素为单字段值或逗号分隔的多字段值)
+     * @return fieldValue → count 映射(不存在的桶不包含在返回值中)
+     */
+    public Map<String, Integer> countByBuckets(String dbName, String tableName, String splitField,
+                                                List<String> fieldValues) {
+        if (fieldValues == null || fieldValues.isEmpty()) {
+            return Map.of();
+        }
+        // 多字段拆分回退到逐桶查询
+        if (splitField != null && splitField.contains(",")) {
+            Map<String, Integer> result = new HashMap<>();
+            for (String fv : fieldValues) {
+                result.put(fv, countByBucket(dbName, tableName, splitField, fv));
+            }
+            return result;
+        }
+        // 单字段拆分:GROUP BY 一次查询
+        StringBuilder sql = new StringBuilder("SELECT ").append(splitField)
+                .append(", COUNT(*) AS cnt FROM ").append(tableName)
+                .append(" WHERE ").append(splitField).append(" IN (");
+        List<Object> params = new ArrayList<>();
+        for (int i = 0; i < fieldValues.size(); i++) {
+            if (i > 0) sql.append(", ");
+            sql.append("?");
+            params.add(fieldValues.get(i));
+        }
+        sql.append(") GROUP BY ").append(splitField);
+        SqlStatement stmt = new SqlStatement(sql.toString(), params);
+        List<Map<String, Object>> rows = getJdbc(dbName).queryForList(stmt);
+        Map<String, Integer> result = new HashMap<>(rows.size());
+        for (Map<String, Object> row : rows) {
+            String key = String.valueOf(row.get(splitField));
+            Number count = (Number) row.get("cnt");
+            result.put(key, count != null ? count.intValue() : 0);
+        }
+        return result;
     }
 
     // ==================== 查询 ====================

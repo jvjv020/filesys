@@ -5,6 +5,7 @@ import com.fmsy.enums.CommandType;
 import com.fmsy.lifecycle.ShutdownService;
 import com.fmsy.model.Command;
 import com.fmsy.repository.CommandRepository;
+import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.ResultRepository;
 import com.fmsy.transfer.TransferService;
 import com.fmsy.util.ColumnNames;
@@ -50,6 +51,7 @@ public class PollingService {
     private final ResultRepository resultRepository;
     private final TransferService transferService;
     private final CommandRepository commandRepository;
+    private final DetailRepository detailRepository;
     private final BatchDispatcher batchDispatcher;
 
     /** 正在处理的任务映射表,键:categoryCode_controlCode */
@@ -85,6 +87,7 @@ public class PollingService {
     /**
      * 释放超时任务。
      * 将超过 taskTimeoutHours 仍未完成的任务标记为 ERROR,记录到结果表,便于其他节点抢接。
+     * 同步级联释放该命令下卡在 P 的明细表桶,避免子节点崩溃后桶永久卡住。
      */
     private void releaseTimeoutTasks() {
         try {
@@ -98,6 +101,17 @@ public class PollingService {
                 Long id = ((Number) job.get(ColumnNames.ID)).longValue();
                 String categoryCode = (String) job.get(ColumnNames.CATEGORY_CODE);
                 String controlCode = (String) job.get(ColumnNames.CONTROL_CODE);
+
+                // 级联释放该命令下明细表 P 桶 → E,使 MergeFlowService 能检测并终止合并
+                try {
+                    int released = detailRepository.releaseTimeoutBuckets(id);
+                    if (released > 0) {
+                        log.info("Cascaded release of {} P buckets for timeout command: {}", released, id);
+                    }
+                } catch (DataAccessException e) {
+                    log.error("Failed to release detail buckets for timeout command {}: {}", id, e.getMessage());
+                }
+
                 resultRepository.insertSimple(id, categoryCode, controlCode, ColumnNames.STATUS_ERROR, "执行超时自动释放");
                 log.info("Released timeout command: {}", id);
             }

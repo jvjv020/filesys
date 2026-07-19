@@ -4,6 +4,7 @@ import com.fmsy.config.AppConfig;
 import com.fmsy.lifecycle.ShutdownService;
 import com.fmsy.model.Command;
 import com.fmsy.repository.CommandRepository;
+import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.ResultRepository;
 import com.fmsy.transfer.TransferService;
 import org.junit.jupiter.api.BeforeEach;
@@ -54,6 +55,9 @@ class PollingServiceTest {
     private CommandRepository commandRepository;
 
     @Mock
+    private DetailRepository detailRepository;
+
+    @Mock
     private BatchDispatcher batchDispatcher;
 
     private PollingService pollingService;
@@ -67,7 +71,7 @@ class PollingServiceTest {
         when(pollingConfig.getBatchSize()).thenReturn(20);
         pollingService = new PollingService(
                 appConfig, shutdownService, resultRepository,
-                transferService, commandRepository, batchDispatcher);
+                transferService, commandRepository, detailRepository, batchDispatcher);
     }
 
     @Nested

@@ -150,6 +150,10 @@ public class ChildBucketProcessor {
                                     bucket.getId(), e.getMessage(), e);
                             detailRepository.updateStatus(bucket.getId(),
                                     ColumnNames.STATUS_ERROR, nodeId);
+                            // 桶失败时尽快通知主命令,避免子命令结果写入后、通知前进程崩溃
+                            // 导致主命令卡在 P 状态(后续 writeSubCommandResult 中也会再调用一次,
+                            // 但 updateStatusIfProcessing 保证幂等)
+                            notifyMainCommandOnFailure(subCommand, config);
                             failedCount.incrementAndGet();
                         }
                     });

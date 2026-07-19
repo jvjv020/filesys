@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /**
@@ -67,6 +68,30 @@ public class SplitFlowService {
                 log.info("Split flow completed for command: {}", mainCommandId);
             } catch (Exception e) {
                 log.error("Split flow failed for command {}: {}", mainCommandId, e.getMessage(), e);
+            }
+        });
+    }
+
+    /**
+     * 异步拆分 + 完成回调。
+     * 拆分完成后调用 onComplete(含 markSplitDone),异常时调用 onError。
+     * 供 MultiNodeDownloadHandler 在 SERIAL 模式下异步切分,避免阻塞 Handler 线程。
+     *
+     * @param onComplete 拆分成功完成回调(负责创建子命令 + 启动合并)
+     * @param onError    拆分失败回调(负责置主命令为 E)
+     */
+    public void startSplitAsync(Long mainCommandId, TransferConfig config,
+                                Runnable onComplete, java.util.function.Consumer<Exception> onError) {
+        CompletableFuture.runAsync(() -> {
+            LogUtils.setTaskId(mainCommandId);
+            try {
+                doSplit(mainCommandId, config);
+                commandRepository.markSplitDone(mainCommandId);
+                log.info("Split flow completed for command: {}", mainCommandId);
+                onComplete.run();
+            } catch (Exception e) {
+                log.error("Split flow failed for command {}: {}", mainCommandId, e.getMessage(), e);
+                onError.accept(e);
             }
         });
     }

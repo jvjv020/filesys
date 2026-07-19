@@ -134,41 +134,100 @@ class MultiNodeDownloadHandlerTest {
         }
 
         @Test
-        @DisplayName("should call splitSync + createChildCommands for SERIAL mode")
-        void shouldUseSplitSyncAndCreateChildCommands() throws Exception {
-            when(bucketDistributor.createChildCommands(command.getId(), "CAT001", "CTRL001",
-                    baseFileInfo.fullPath())).thenReturn(3);
-
+        @DisplayName("should call startSplitAsync for SERIAL mode")
+        void shouldUseStartSplitAsync() throws Exception {
             handler.handle(command, config, result);
 
-            verify(splitFlowService).splitSync(command.getId(), config);
-            verify(bucketDistributor).createChildCommands(command.getId(), "CAT001", "CTRL001",
-                    baseFileInfo.fullPath());
-            verify(mergeFlowService).startMergeAsync(eq(1L), eq(config), eq(baseFileInfo),
-                    any(Runnable.class), any(Runnable.class));
+            // SERIAL 模式改为异步切分,handle 中立即调用 markChildrenCreated 标记为 P
+            // 再调用 startSplitAsync 异步执行
+            verify(splitFlowService).startSplitAsync(eq(command.getId()), eq(config),
+                    any(Runnable.class), any());
             assertEquals(ColumnNames.STATUS_PROCESSING, result.getResult());
         }
 
         @Test
-        @DisplayName("should mark children failed when splitSync + createChildCommands returns 0")
-        void shouldMarkChildrenFailedWhenZeroChildren() throws Exception {
-            when(bucketDistributor.createChildCommands(command.getId(), "CAT001", "CTRL001",
-                    baseFileInfo.fullPath())).thenReturn(0);
-
+        @DisplayName("should not call splitSync for SERIAL mode")
+        void shouldNotCallSplitSync() throws Exception {
             handler.handle(command, config, result);
 
-            assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
-            verify(mergeFlowService, never()).startMergeAsync(any(), any(), any(), any(), any());
+            // 异步切分后不再调用同步 splitSync
+            verify(splitFlowService, never()).splitSync(any(), any());
         }
 
         @Test
-        @DisplayName("should mark children created when children count > 0")
-        void shouldMarkChildrenCreatedWhenChildrenExist() throws Exception {
-            when(bucketDistributor.createChildCommands(command.getId(), "CAT001", "CTRL001",
-                    baseFileInfo.fullPath())).thenReturn(5);
+        @DisplayName("async callback should create child commands and start merge when split succeeds")
+        void asyncCallbackShouldCreateChildrenAndMerge() throws Exception {
+            // 捕获 startSplitAsync 的 onComplete 回调
+            final Runnable[] onComplete = new Runnable[1];
+            doAnswer(invocation -> {
+                onComplete[0] = invocation.getArgument(2);
+                return null;
+            }).when(splitFlowService).startSplitAsync(eq(command.getId()), eq(config),
+                    any(Runnable.class), any());
 
             handler.handle(command, config, result);
 
+            // 模拟切分完成回调
+            assertNotNull(onComplete[0]);
+            when(bucketDistributor.createChildCommands(command.getId(), "CAT001", "CTRL001",
+                    baseFileInfo.fullPath())).thenReturn(3);
+            onComplete[0].run();
+
+            verify(bucketDistributor).createChildCommands(command.getId(), "CAT001", "CTRL001",
+                    baseFileInfo.fullPath());
+            verify(mergeFlowService).startMergeAsync(eq(1L), eq(config), eq(baseFileInfo),
+                    any(Runnable.class), any(Runnable.class));
+        }
+
+        @Test
+        @DisplayName("async callback should skip merge when no buckets created")
+        void asyncCallbackShouldSkipMergeWhenNoBuckets() throws Exception {
+            final Runnable[] onComplete = new Runnable[1];
+            doAnswer(invocation -> {
+                onComplete[0] = invocation.getArgument(2);
+                return null;
+            }).when(splitFlowService).startSplitAsync(eq(command.getId()), eq(config),
+                    any(Runnable.class), any());
+
+            handler.handle(command, config, result);
+
+            // 模拟切分完成但无桶
+            assertNotNull(onComplete[0]);
+            when(bucketDistributor.createChildCommands(command.getId(), "CAT001", "CTRL001",
+                    baseFileInfo.fullPath())).thenReturn(0);
+            onComplete[0].run();
+
+            verify(bucketDistributor).createChildCommands(command.getId(), "CAT001", "CTRL001",
+                    baseFileInfo.fullPath());
+            verify(mergeFlowService, never()).startMergeAsync(any(), any(), any(), any(), any());
+            verify(commandRepository).updateStatus(command.getId(), ColumnNames.STATUS_SKIPPED);
+        }
+
+        @Test
+        @DisplayName("async callback should mark main command error when split fails")
+        void asyncCallbackShouldMarkErrorWhenSplitFails() throws Exception {
+            final java.util.function.Consumer<Exception>[] onError = new java.util.function.Consumer[1];
+            doAnswer(invocation -> {
+                onError[0] = invocation.getArgument(3);
+                return null;
+            }).when(splitFlowService).startSplitAsync(eq(command.getId()), eq(config),
+                    any(Runnable.class), any());
+
+            handler.handle(command, config, result);
+
+            // 模拟切分失败
+            assertNotNull(onError[0]);
+            onError[0].accept(new RuntimeException("Split failed"));
+
+            verify(commandRepository).updateStatus(command.getId(), ColumnNames.STATUS_ERROR);
+        }
+
+        @Test
+        @DisplayName("should mark children created immediately for async SERIAL mode")
+        void shouldMarkChildrenCreatedImmediately() throws Exception {
+            handler.handle(command, config, result);
+
+            // 异步模式下立即标记为 P,不等切分完成
             assertEquals(ColumnNames.STATUS_PROCESSING, result.getResult());
         }
     }

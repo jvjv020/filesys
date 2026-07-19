@@ -212,6 +212,29 @@ public class DetailRepository {
         return count != null ? count : 0;
     }
 
+    /**
+     * 一次查询返回(空, P, Y)三态计数,用于合并流程的状态判断。
+     * 替换三次独立的 countByStatus 调用,减少 DB 往返。
+     *
+     * @param commandId 主命令 ID
+     * @return long[0]=empty, long[1]=processing, long[2]=success
+     */
+    public long[] countMergeStatus(Long commandId) {
+        String sql = "SELECT " +
+                "COALESCE(SUM(CASE WHEN " + ColumnNames.PROCESS_STATUS + "='' THEN 1 ELSE 0 END), 0) AS empty_count, " +
+                "COALESCE(SUM(CASE WHEN " + ColumnNames.PROCESS_STATUS + "='P' THEN 1 ELSE 0 END), 0) AS proc_count, " +
+                "COALESCE(SUM(CASE WHEN " + ColumnNames.PROCESS_STATUS + "='Y' THEN 1 ELSE 0 END), 0) AS success_count " +
+                "FROM " + TableNames.DETAIL_TABLE +
+                " WHERE " + ColumnNames.DETAIL_COMMAND_ID + "=?";
+        List<Map<String, Object>> rows = getJdbc().queryForList(sql, commandId);
+        if (rows.isEmpty()) return new long[]{0, 0, 0};
+        Map<String, Object> row = rows.get(0);
+        long empty = ((Number) row.get("empty_count")).longValue();
+        long proc = ((Number) row.get("proc_count")).longValue();
+        long success = ((Number) row.get("success_count")).longValue();
+        return new long[]{empty, proc, success};
+    }
+
     // ==================== 批量状态更新(合并流程) ====================
 
     private static final String SQL_BATCH_UPDATE_STATUS =
@@ -233,6 +256,31 @@ public class DetailRepository {
         if (affected > 0) {
             log.info("Batch updated {} details from '{}' to '{}' for command {}",
                     affected, oldStatus, newStatus, commandId);
+        }
+        return affected;
+    }
+
+    // ==================== 超时释放(多节点桶竞争) ====================
+
+    private static final String SQL_RELEASE_TIMEOUT_BUCKETS =
+        "UPDATE " + TableNames.DETAIL_TABLE + " SET " +
+        ColumnNames.PROCESS_STATUS + "=?, " + ColumnNames.PROCESSING_NODE + "=NULL " +
+        "WHERE " + ColumnNames.DETAIL_COMMAND_ID + "=? AND " +
+        ColumnNames.PROCESS_STATUS + "=?";
+
+    /**
+     * 释放指定主命令下所有超时 P 桶。
+     * 在指令表超时释放后调用,级联释放该主命令下所有卡在 P 的桶,
+     * 使 MergeFlowService 能检测到 E 桶并终止合并。
+     *
+     * @param mainCommandId 主命令 ID
+     * @return 释放的桶数
+     */
+    public int releaseTimeoutBuckets(Long mainCommandId) {
+        int affected = getJdbc().update(SQL_RELEASE_TIMEOUT_BUCKETS,
+                ColumnNames.STATUS_ERROR, mainCommandId, ColumnNames.STATUS_PROCESSING);
+        if (affected > 0) {
+            log.warn("Released {} timeout P buckets for main command {}", affected, mainCommandId);
         }
         return affected;
     }

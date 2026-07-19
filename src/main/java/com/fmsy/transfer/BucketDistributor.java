@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 桶分发器 - 用于DOWNLOAD_MULTI_NODE场景下的数据分桶
@@ -139,11 +140,24 @@ public class BucketDistributor {
         }
 
         return dbPool.getTransactionTemplate(config.getDbName()).execute(status -> {
-            for (Detail bucket : existingBuckets) {
-                int recordCount = targetTableRepository.countByBucket(
-                        config.getDbName(), config.getTableName(), splitFields, bucket.getFieldValue());
-                detailRepository.updateAuditCount(bucket.getId(), recordCount);
-                log.debug("Updated bucket {} with audit count {}", bucket.getId(), recordCount);
+            // 桶数多时批量查询,减少 SQL 往返
+            if (existingBuckets.size() >= 3) {
+                List<String> fieldValues = existingBuckets.stream()
+                        .map(Detail::getFieldValue)
+                        .toList();
+                Map<String, Integer> counts = targetTableRepository.countByBuckets(
+                        config.getDbName(), config.getTableName(), splitFields, fieldValues);
+                for (Detail bucket : existingBuckets) {
+                    int recordCount = counts.getOrDefault(bucket.getFieldValue(), 0);
+                    detailRepository.updateAuditCount(bucket.getId(), recordCount);
+                }
+            } else {
+                // 桶数少时逐桶查询
+                for (Detail bucket : existingBuckets) {
+                    int recordCount = targetTableRepository.countByBucket(
+                            config.getDbName(), config.getTableName(), splitFields, bucket.getFieldValue());
+                    detailRepository.updateAuditCount(bucket.getId(), recordCount);
+                }
             }
 
             return createChildCommands(command.getId(),

@@ -1,5 +1,6 @@
 package com.fmsy.transfer.download;
 
+import com.fmsy.config.AppConfig;
 import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
 import com.fmsy.ftp.FtpPool;
@@ -50,6 +51,7 @@ public class MergeFlowService {
     private final TransferSupport transferSupport;
     private final ConverterFactory converterFactory;
     private final FieldMappingBuilder fieldMappingBuilder;
+    private final AppConfig appConfig;
 
     /** 每命令的终止标志 — 避免多命令间共享 volatile 字段造成误中断 */
     private final ConcurrentHashMap<Long, Boolean> abortFlags = new ConcurrentHashMap<>();
@@ -68,6 +70,7 @@ public class MergeFlowService {
     public void startMergeAsync(Long mainCommandId, TransferConfig config, ResolvedPath baseFileInfo,
                                 Runnable onSuccess, Runnable onError) {
         abortFlags.put(mainCommandId, false);
+        long startTime = System.currentTimeMillis();
         CompletableFuture.runAsync(() -> {
             LogUtils.setTaskId(mainCommandId);
             try {
@@ -75,9 +78,9 @@ public class MergeFlowService {
                         && !config.getSplitFields().isEmpty();
                 boolean ok;
                 if (isSplitDownload) {
-                    ok = mergeSplitFiles(mainCommandId, config, baseFileInfo);
+                    ok = mergeSplitFiles(mainCommandId, config, baseFileInfo, startTime);
                 } else {
-                    ok = mergeSingleFile(mainCommandId, config, baseFileInfo);
+                    ok = mergeSingleFile(mainCommandId, config, baseFileInfo, startTime);
                 }
                 if (ok) {
                     log.info("Merge flow completed for command: {}", mainCommandId);
@@ -98,9 +101,13 @@ public class MergeFlowService {
     // ==================== 单文件下发 ====================
 
     /**
+     * @param startTime 合并启动时间(System.currentTimeMillis),用于超时判断
      * @return true=合并成功(所有桶已被 APPE 合并); false=合并终止(发现 E 桶或被中止)
      */
-    private boolean mergeSingleFile(Long mainCommandId, TransferConfig config, ResolvedPath baseFileInfo) {
+    private boolean mergeSingleFile(Long mainCommandId, TransferConfig config, ResolvedPath baseFileInfo,
+                                    long startTime) {
+        int timeoutHours = appConfig.getPolling().getTaskTimeoutHours();
+        long timeoutMs = timeoutHours * 3600_000L;
         String ftpName = config.getFtpName();
         String targetPath = baseFileInfo.fullPath();
         String parentDir = FilePathUtils.extractParentDirectory(targetPath);
@@ -113,9 +120,18 @@ public class MergeFlowService {
 
         Set<Long> mergedIds = ConcurrentHashMap.newKeySet();
         boolean headerWritten = false;
+        long pollIntervalMs = SystemConstants.MERGE_POLL_INTERVAL_MS;
 
         while (true) {
             if (isAborted(mainCommandId)) return false;
+
+            // 整体超时保护:防止子节点崩溃或桶卡 P 时合并循环永远运行
+            if (System.currentTimeMillis() - startTime >= timeoutMs) {
+                log.warn("Merge[{}] single file timeout after {}ms (>{})h", mainCommandId,
+                        System.currentTimeMillis() - startTime, timeoutHours);
+                failRemaining(mainCommandId);
+                return false;
+            }
 
             // 检查 E 桶 → 终止
             if (hasErrorBuckets(mainCommandId)) {
@@ -142,6 +158,8 @@ public class MergeFlowService {
                     }
                     // OK 文件未就绪的桶留待下次轮询
                 }
+                // 有桶可合并时立即重置轮询间隔,快速响应后续桶
+                pollIntervalMs = SystemConstants.MERGE_POLL_INTERVAL_MS;
                 continue;
             }
 
@@ -152,25 +170,40 @@ public class MergeFlowService {
                 writeFlagFile(ftpName, config, baseFileInfo, totalCount, "TOTAL");
                 return true;
             }
-            TransferSupport.safeSleep(SystemConstants.MERGE_POLL_INTERVAL_MS);
+            // 无桶时指数退避:3s → 6s → 12s → 24s → 30s(上限),减少空轮询
+            TransferSupport.safeSleep(pollIntervalMs);
+            pollIntervalMs = Math.min(pollIntervalMs * 2, 30000L);
         }
     }
 
     // ==================== 拆分下发 ====================
 
     /**
+     * @param startTime 合并启动时间(System.currentTimeMillis),用于超时判断
      * @return true=合并成功(所有拆分文件已被 APPE 合并); false=合并终止(发现 E 桶或被中止)
      */
-    private boolean mergeSplitFiles(Long mainCommandId, TransferConfig config, ResolvedPath baseFileInfo) {
+    private boolean mergeSplitFiles(Long mainCommandId, TransferConfig config, ResolvedPath baseFileInfo,
+                                    long startTime) {
+        int timeoutHours = appConfig.getPolling().getTaskTimeoutHours();
+        long timeoutMs = timeoutHours * 3600_000L;
         String ftpName = config.getFtpName();
         String splitFields = config.getSplitFields();
         FieldMapping mapping = fieldMappingBuilder.buildForDownload(config);
         FileConverter converter = converterFactory.get(config.getParserType());
         Set<Long> mergedIds = ConcurrentHashMap.newKeySet();
         Set<String> finalizedTargets = ConcurrentHashMap.newKeySet();
+        long pollIntervalMs = SystemConstants.MERGE_POLL_INTERVAL_MS;
 
         while (true) {
             if (isAborted(mainCommandId)) return false;
+
+            // 整体超时保护
+            if (System.currentTimeMillis() - startTime >= timeoutMs) {
+                log.warn("Merge[{}] split files timeout after {}ms (>{}h)", mainCommandId,
+                        System.currentTimeMillis() - startTime, timeoutHours);
+                failRemaining(mainCommandId);
+                return false;
+            }
 
             if (hasErrorBuckets(mainCommandId)) {
                 failRemaining(mainCommandId);
@@ -186,15 +219,21 @@ public class MergeFlowService {
                     writeFlagFile(ftpName, config, baseFileInfo, 0, "TOTAL");
                     return true;
                 }
-                TransferSupport.safeSleep(SystemConstants.MERGE_POLL_INTERVAL_MS);
+                // 无桶时指数退避,减少空轮询
+                TransferSupport.safeSleep(pollIntervalMs);
+                pollIntervalMs = Math.min(pollIntervalMs * 2, 30000L);
                 continue;
             }
 
-            // 按 fieldValue 分组
+            // 有桶可合并时立即重置轮询间隔
+            pollIntervalMs = SystemConstants.MERGE_POLL_INTERVAL_MS;
+
+            // 按 fieldValue 分组后并行处理各文件
+            // 不同 fieldValue 对应不同的目标文件,无冲突,可并行 APPE
             var groups = ready.stream()
                     .collect(Collectors.groupingBy(d -> d.getFieldValue() != null ? d.getFieldValue() : ""));
 
-            for (var entry : groups.entrySet()) {
+            groups.entrySet().parallelStream().forEach(entry -> {
                 String fv = entry.getKey();
                 List<Detail> group = entry.getValue();
 
@@ -235,7 +274,7 @@ public class MergeFlowService {
                     writeFooterToFile(ftpName, targetPath, converter, mapping);
                     writeFlagFile(ftpName, config, baseFileInfo, groupCount, "SUB");
                 }
-            }
+            });
         }
     }
 
@@ -363,12 +402,11 @@ public class MergeFlowService {
      * @param mergedCount 已合并的桶数(mergedIds.size())
      */
     private boolean isMergeDone(Long cmdId, int mergedCount) {
-        int empty = detailRepository.countByStatus(cmdId, ColumnNames.STATUS_EMPTY);
-        int proc = detailRepository.countByStatus(cmdId, ColumnNames.STATUS_PROCESSING);
+        long[] counts = detailRepository.countMergeStatus(cmdId);
+        long empty = counts[0], proc = counts[1], totalY = counts[2];
         if (empty > 0 || proc > 0) return false;
         if (!commandRepository.isSplitDone(cmdId)) return false;
         // 兜底检查:确保没有遗漏的 Y 桶(极端竞态 — 子节点刚好写 Y 但查询在之后)
-        int totalY = detailRepository.countByStatus(cmdId, ColumnNames.STATUS_SUCCESS);
         return totalY <= mergedCount;
     }
 
