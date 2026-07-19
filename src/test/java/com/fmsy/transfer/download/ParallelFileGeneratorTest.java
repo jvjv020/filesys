@@ -17,6 +17,9 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.IntFunction;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -50,7 +53,7 @@ class ParallelFileGeneratorTest {
     void setUp() {
         when(appConfig.getDownload()).thenReturn(download);
         when(download.getParallelThreads()).thenReturn(3);
-        generator = new ParallelFileGenerator(targetTableRepository, partitionHelper, appConfig);
+        generator = new ParallelFileGenerator(targetTableRepository, partitionHelper, appConfig, Executors::newFixedThreadPool);
     }
 
     @Nested

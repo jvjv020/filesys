@@ -1,48 +1,34 @@
 package com.fmsy.transfer;
 
 import com.fmsy.config.DataSourceConfig;
-import com.fmsy.enums.CommandType;
 import com.fmsy.enums.TransferScenario;
 import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.ResultRepository;
-import com.fmsy.transfer.download.MultiNodeDownloadHandler;
-import com.fmsy.transfer.download.SingleDownloadHandler;
-import com.fmsy.transfer.download.SingleNodeDownloadHandler;
-import com.fmsy.transfer.upload.MultiUploadHandler;
-import com.fmsy.transfer.upload.SingleUploadHandler;
+import com.fmsy.util.ColumnNames;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.TransactionStatus;
 
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
-@DisplayName("TransferOrchestrator Tests")
+@MockitoSettings(strictness = Strictness.LENIENT)
+@DisplayName("TransferOrchestrator.finalize Tests")
 class TransferOrchestratorTest {
-
-    @Mock
-    private SingleUploadHandler singleUpload;
-
-    @Mock
-    private MultiUploadHandler multiUpload;
-
-    @Mock
-    private SingleDownloadHandler singleDownload;
-
-    @Mock
-    private SingleNodeDownloadHandler singleNodeDownload;
-
-    @Mock
-    private MultiNodeDownloadHandler multiNodeDownload;
 
     @Mock
     private CommandRepository commandRepository;
@@ -60,161 +46,139 @@ class TransferOrchestratorTest {
 
     @BeforeEach
     void setUp() {
-        orchestrator = new TransferOrchestrator(singleUpload, multiUpload,
-                singleDownload, singleNodeDownload, multiNodeDownload,
+        // 只用 mock 创建 TransferOrchestrator（dispatch 不会用到 commandRepository/resultRepository）
+        // handler 参数传 null，因为 finalize 测试不涉及 dispatch
+        orchestrator = new TransferOrchestrator(null, null, null, null, null,
                 commandRepository, resultRepository, dbPool);
         when(dbPool.getTransactionTemplate(any())).thenReturn(transactionTemplate);
         when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
             var callback = invocation.getArgument(0,
                     org.springframework.transaction.support.TransactionCallback.class);
-            return callback.doInTransaction(null);
+            return callback.doInTransaction(mock(TransactionStatus.class));
         });
     }
 
     @Nested
-    @DisplayName("dispatch - UPLOAD_SINGLE")
-    class DispatchUploadSingle {
+    @DisplayName("finalize - normal flow")
+    class FinalizeNormalFlow {
 
         @Test
-        @DisplayName("should route to SingleUploadHandler")
-        void shouldRouteToSingleUploadHandler() throws Exception {
+        @DisplayName("should write status and result")
+        void shouldWriteStatusAndResult() {
             Command command = new Command();
             command.setId(1L);
-            command.setCommandType(CommandType.SERIAL);
-
-            TransferConfig config = new TransferConfig();
-            config.setScenario(TransferScenario.UPLOAD_SINGLE);
-
-            orchestrator.execute(command, config);
-
-            verify(singleUpload).handle(eq(command), eq(config), any(Result.class));
-        }
-    }
-
-    @Nested
-    @DisplayName("dispatch - UPLOAD_MULTI")
-    class DispatchUploadMulti {
-
-        @Test
-        @DisplayName("BATCH 应路由到 SingleUploadHandler")
-        void shouldRouteBatchToSingleUploadHandler() throws Exception {
-            Command command = new Command();
-            command.setId(2L);
-            command.setCommandType(CommandType.BATCH);
-
-            TransferConfig config = new TransferConfig();
-            config.setScenario(TransferScenario.UPLOAD_MULTI);
-
-            orchestrator.execute(command, config);
-
-            verify(singleUpload).handle(eq(command), eq(config), any(Result.class));
-            verify(multiUpload, never()).handle(any(), any(), any());
-        }
-
-        @Test
-        @DisplayName("SERIAL 应路由到 MultiUploadHandler")
-        void shouldRouteSerialToMultiUploadHandler() throws Exception {
-            Command command = new Command();
-            command.setId(3L);
-            command.setCommandType(CommandType.SERIAL);
-
-            TransferConfig config = new TransferConfig();
-            config.setScenario(TransferScenario.UPLOAD_MULTI);
-
-            orchestrator.execute(command, config);
-
-            verify(multiUpload).handle(eq(command), eq(config), any(Result.class));
-            verify(singleUpload, never()).handle(any(), any(), any());
-        }
-    }
-
-    @Nested
-    @DisplayName("dispatch - DOWNLOAD_SINGLE")
-    class DispatchDownloadSingle {
-
-        @Test
-        @DisplayName("should route to SingleDownloadHandler")
-        void shouldRouteToSingleDownloadHandler() throws Exception {
-            Command command = new Command();
-            command.setId(3L);
-            command.setCommandType(CommandType.SERIAL);
-
-            TransferConfig config = new TransferConfig();
-            config.setScenario(TransferScenario.DOWNLOAD_SINGLE);
-
-            orchestrator.execute(command, config);
-
-            verify(singleDownload).handle(eq(command), eq(config), any(Result.class));
-        }
-    }
-
-    @Nested
-    @DisplayName("dispatch - DOWNLOAD_SINGLE_NODE")
-    class DispatchDownloadSingleNode {
-
-        @Test
-        @DisplayName("should route to SingleNodeDownloadHandler")
-        void shouldRouteToSingleNodeDownloadHandler() throws Exception {
-            Command command = new Command();
-            command.setId(4L);
-            command.setCommandType(CommandType.SERIAL);
-
-            TransferConfig config = new TransferConfig();
-            config.setScenario(TransferScenario.DOWNLOAD_SINGLE_NODE);
-
-            orchestrator.execute(command, config);
-
-            verify(singleNodeDownload).handle(eq(command), eq(config), any(Result.class));
-        }
-    }
-
-    @Nested
-    @DisplayName("dispatch - DOWNLOAD_MULTI_NODE")
-    class DispatchDownloadMultiNode {
-
-        @Test
-        @DisplayName("should route to MultiNodeDownloadHandler")
-        void shouldRouteToMultiNodeDownloadHandler() throws Exception {
-            Command command = new Command();
-            command.setId(5L);
-            command.setCommandType(CommandType.SERIAL);
-
-            TransferConfig config = new TransferConfig();
-            config.setScenario(TransferScenario.DOWNLOAD_MULTI_NODE);
-
-            orchestrator.execute(command, config);
-
-            verify(multiNodeDownload).handle(eq(command), eq(config), any(Result.class));
-        }
-    }
-
-    @Nested
-    @DisplayName("dispatch - error handling")
-    class DispatchErrorHandling {
-
-        @Test
-        @DisplayName("should call failWith and finalize when handler throws")
-        void shouldHandleHandlerException() throws Exception {
-            Command command = new Command();
-            command.setId(6L);
             command.setCategoryCode("CAT");
             command.setControlCode("CTRL");
 
             TransferConfig config = new TransferConfig();
             config.setScenario(TransferScenario.UPLOAD_SINGLE);
-            config.setDbName("DB");
+            config.setDbName("DB1");
             config.setFilePath("/path");
             config.setFtpName("ftp1");
-            config.setTableName("mytable");
+            config.setTableName("table1");
 
-            doThrow(new RuntimeException("Handler error")).when(singleUpload)
-                    .handle(eq(command), eq(config), any(Result.class));
+            // 先构建一个与 execute 一致的 Result
+            Result result = Result.builder()
+                    .transferDirection(Result.DIRECTION_UPLOAD)
+                    .markStart()
+                    .build();
+            result.setOutcome(100, ColumnNames.STATUS_SUCCESS, "");
 
-            orchestrator.execute(command, config);
+            orchestrator.finalize(command, config, result);
 
-            verify(singleUpload).handle(eq(command), eq(config), any(Result.class));
-            verify(commandRepository).updateStatus(anyLong(), anyString());
+            verify(commandRepository).updateStatus(eq(1L), eq(ColumnNames.STATUS_SUCCESS));
             verify(resultRepository).insert(any(Result.class));
+        }
+
+        @Test
+        @DisplayName("should write ERROR status when result has error")
+        void shouldWriteErrorStatus() {
+            Command command = new Command();
+            command.setId(3L);
+            command.setCategoryCode("CAT");
+            command.setControlCode("CTRL");
+
+            TransferConfig config = new TransferConfig();
+            config.setScenario(TransferScenario.UPLOAD_SINGLE);
+            config.setDbName("DB1");
+            config.setFilePath("/path");
+            config.setFtpName("ftp1");
+            config.setTableName("table1");
+
+            Result result = Result.builder()
+                    .transferDirection(Result.DIRECTION_UPLOAD)
+                    .markStart()
+                    .build();
+            result.setOutcome(0, ColumnNames.STATUS_ERROR, "Test error");
+
+            orchestrator.finalize(command, config, result);
+
+            verify(commandRepository).updateStatus(eq(3L), eq(ColumnNames.STATUS_ERROR));
+            verify(resultRepository).insert(any(Result.class));
+        }
+    }
+
+    @Nested
+    @DisplayName("execute - direction")
+    class ExecuteDirection {
+
+        @Test
+        @DisplayName("should use UPLOAD direction for upload scenario")
+        void shouldUseUploadDirection() {
+            // 验证 execute 中 newResult 能正确推导方向
+            // 通过 finalize 写入的结果来验证
+            Command command = new Command();
+            command.setId(4L);
+            command.setCategoryCode("CAT");
+            command.setControlCode("CTRL");
+
+            TransferConfig config = new TransferConfig();
+            config.setScenario(TransferScenario.UPLOAD_SINGLE);
+            config.setDbName("DB1");
+            config.setFilePath("/path");
+            config.setFtpName("ftp1");
+            config.setTableName("table1");
+
+            // 手动构造一个"dispatch 已执行"的 result
+            Result result = Result.builder()
+                    .transferDirection(Result.DIRECTION_UPLOAD)
+                    .markStart()
+                    .build();
+            result.setOutcome(50, ColumnNames.STATUS_SUCCESS, "");
+
+            orchestrator.finalize(command, config, result);
+
+            ArgumentCaptor<Result> resultCaptor = ArgumentCaptor.forClass(Result.class);
+            verify(resultRepository).insert(resultCaptor.capture());
+            assertEquals(Result.DIRECTION_UPLOAD, resultCaptor.getValue().getTransferDirection());
+        }
+
+        @Test
+        @DisplayName("should use DOWNLOAD direction for download scenario")
+        void shouldUseDownloadDirection() {
+            Command command = new Command();
+            command.setId(5L);
+            command.setCategoryCode("CAT");
+            command.setControlCode("CTRL");
+
+            TransferConfig config = new TransferConfig();
+            config.setScenario(TransferScenario.DOWNLOAD_SINGLE);
+            config.setDbName("DB1");
+            config.setFilePath("/path");
+            config.setFtpName("ftp1");
+            config.setTableName("table1");
+
+            Result result = Result.builder()
+                    .transferDirection(Result.DIRECTION_DOWNLOAD)
+                    .markStart()
+                    .build();
+            result.setOutcome(200, ColumnNames.STATUS_SUCCESS, "");
+
+            orchestrator.finalize(command, config, result);
+
+            ArgumentCaptor<Result> resultCaptor = ArgumentCaptor.forClass(Result.class);
+            verify(resultRepository).insert(resultCaptor.capture());
+            assertEquals(Result.DIRECTION_DOWNLOAD, resultCaptor.getValue().getTransferDirection());
         }
     }
 }

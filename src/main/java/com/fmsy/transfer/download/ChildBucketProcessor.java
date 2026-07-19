@@ -16,7 +16,6 @@ import com.fmsy.repository.ResultRepository;
 import com.fmsy.repository.TargetTableRepository;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferSupport;
-import com.fmsy.transfer.TransferUtils;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.FilePathUtils;
 import com.fmsy.util.LogUtils;
@@ -133,7 +132,7 @@ public class ChildBucketProcessor {
                         break;
                     }
                     // 指数退避:第1次2s,第2次4s,最大10s
-                    safeSleep(computeBackoffMs(iteration));
+                    TransferSupport.safeSleep(computeBackoffMs(iteration));
                     continue;
                 }
 
@@ -161,7 +160,7 @@ public class ChildBucketProcessor {
             failedCount.incrementAndGet();
         } finally {
             // 等待所有已提交的桶处理完毕
-            TransferUtils.shutdownExecutor(executor, 1, TimeUnit.HOURS, "ChildBucketProcessor");
+            TransferSupport.shutdownExecutor(executor, 1, TimeUnit.HOURS, "ChildBucketProcessor");
         }
 
         writeSubCommandResult(subCommand, startTime, config,
@@ -365,11 +364,4 @@ public class ChildBucketProcessor {
         }
     }
 
-    private static void safeSleep(long ms) {
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
     }
-}

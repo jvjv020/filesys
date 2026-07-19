@@ -50,7 +50,7 @@ This project uses **Gradle** with the wrapper expected at the parent directory (
         ▼                ▼
   UploadOrchestrator  DownloadOrchestrator
    (FTP → DB)         (DB → FTP)
-   (AbstractTransferOrchestrator.execute template)
+   (TransferOrchestrator.execute template)
                 │
                 ▼
         dispatch by scenario × commandType
@@ -190,7 +190,7 @@ All table/column names live in `util/TableNames` and `util/ColumnNames` as const
 - **The Gradle wrapper lives one directory up** at `D:\Project\FMSY\` (not inside this `FMSY\` source root). All `gradlew.bat` invocations must `cd` there first — both `.bat` scripts do this.
 - Source root: `src/main/java/com/fmsy/` — subpackages mirror responsibility (`polling/`, `transfer/`, `repository/`, `converter/`, `fileops/`, `ftp/`, `db/`, `audit/`, `lifecycle/`, `config/`, `model/`, `enums/`, `util/`, `exception/`)
   - `polling/` — `PollingService` (entry) + `BatchDispatcher` (per-cycle dispatch) + `SerialConstraintChecker` + `CommandProcessingTracker` (in-memory tracker) + `DetailPollingService` (S-type sub-command bucket processor)
-  - `transfer/` — `TransferService` (entry) + `AbstractTransferOrchestrator` (base) + `UploadOrchestrator` / `DownloadOrchestrator` + 6 `*Handler` (one per scenario) + `TransferSupport` (cross-direction) + `UploadSupport` / `DownloadSupport` (direction-specific) + `FieldMappingBuilder` + `BucketDistributor` + `TransferUtils` + `ChildCommandMonitor` (DOWNLOAD_MULTI_NODE child aggregator, in `transfer/download/`)
+  - `transfer/` — `TransferService` (entry) + `TransferOrchestrator` (编排) + 5 `*Handler` (one per scenario) + `TransferSupport` (cross-direction) + `UploadSupport` / `DownloadSupport` (direction-specific) + `FieldMappingBuilder` + `BucketDistributor` + `ChildCommandMonitor` (DOWNLOAD_MULTI_NODE child aggregator, in `transfer/download/`)
   - `repository/` — 5 `*Repository` classes, one per table: `CommandRepository` / `DetailRepository` / `ResultRepository` / `TransferConfigRepository` / `TargetTableRepository`. All `SQL_*` constants live here — never write SQL in business classes.
   - `audit/` — `AuditService` + `AuditScenario` enum (`UPLOAD` / `DOWNLOAD`); replaces the old `String scenario` parameter
 - Tests mirror the same package layout under `src/test/java/com/fmsy/`

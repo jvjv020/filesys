@@ -4,9 +4,11 @@ import com.fmsy.enums.CommandType;
 import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
+import com.fmsy.repository.CommandRepository;
 import com.fmsy.transfer.BucketDistributor;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
+import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,9 +23,12 @@ import org.springframework.stereotype.Component;
  *   <li>SERIAL 模式:调用 SplitFlowService 按 PK 范围切分桶(写入 specName),再创建 S 子命令</li>
  *   <li>两种模式均启动 MergeFlowService 异步合并临时文件到目标文件</li>
  *   <li>成功:result.markChildrenCreated()(主命令保持 PROCESSING,
- *       由 MergeFlowService 在合并完成后更新终态)</li>
+ *       合并完成回调由此处通过 onSuccess 定义,置主命令为 Y)</li>
  *   <li>失败:result.markChildrenFailed(reason)(主命令置 ERROR)</li>
  * </ul>
+ *
+ * <p>合并流程的终态更新(主命令 Y/E)通过 onSuccess/onError 回调定义在本 Handler 中,
+ * 使异步流程的状态转移在主体代码中可见,便于排查。</p>
  *
  * <p>子命令的并发执行由 {@link ChildBucketProcessor} 接管(本 Handler 不参与)。
  *
@@ -39,6 +44,7 @@ public class MultiNodeDownloadHandler implements TransferHandler {
     private final TransferSupport transferSupport;
     private final SplitFlowService splitFlowService;
     private final MergeFlowService mergeFlowService;
+    private final CommandRepository commandRepository;
 
     @Override
     public void handle(Command command, TransferConfig config, Result result) throws Exception {
@@ -80,9 +86,23 @@ public class MultiNodeDownloadHandler implements TransferHandler {
         if (childCount > 0) {
             log.info("Created {} S-type child commands for command: {}", childCount, command.getId());
             // Phase 3: 启动异步合并流程(轮询 Y 桶 → APPE 合并 → 写标志文件)
-            mergeFlowService.startMergeAsync(command.getId(), config, baseFileInfo);
+            // onSuccess/onError 回调在此定义,指令表状态更新代码在 Handler 中可见,
+            // 便于排查异步流程的终态走向
+            Long cmdId = command.getId();
+            mergeFlowService.startMergeAsync(cmdId, config, baseFileInfo,
+                    // onSuccess: 合并成功,主命令终态置 Y
+                    () -> {
+                        commandRepository.updateStatus(cmdId, ColumnNames.STATUS_SUCCESS);
+                        log.info("Merge succeeded, main command {} status -> Y", cmdId);
+                    },
+                    // onError: 合并失败(如子节点报错),主命令终态置 E
+                    () -> {
+                        commandRepository.updateStatus(cmdId, ColumnNames.STATUS_ERROR);
+                        log.warn("Merge failed, main command {} status -> E", cmdId);
+                    }
+            );
             log.info("Started merge flow for command: {}", command.getId());
-            result.markChildrenCreated(childCount);
+            result.markChildrenCreated();
         } else {
             result.markChildrenFailed("No buckets or child command creation returned 0");
         }

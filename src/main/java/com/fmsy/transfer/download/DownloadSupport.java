@@ -183,19 +183,28 @@ public class DownloadSupport {
         }
     }
 
-    /** 前操作 — READY/FLAG 检查 + 目录创建。 */
-    private PipelineResult preCheckPath(FtpClient client, TransferConfig config,
-                                        ResolvedPath targetFile, PipelineOptions opts,
-                                        String filePath) {
-        if (!opts.enablePreCheck) return null;
+    /** 前操作 — READY/FLAG 检查 + 目录创建，返回 false 表示检查未通过。 */
+    public boolean preCheckAndMkdirs(FtpClient client, TransferConfig config,
+                                      ResolvedPath targetFile, String filePath) {
         if (!transferSupport.preCheck(client, config, targetFile)) {
-            log.warn("Pre-check failed for {}", filePath);
-            updateDetailStatus(opts, ColumnNames.STATUS_SKIPPED);
-            return new PipelineResult(0, false, ColumnNames.STATUS_SKIPPED, filePath);
+            return false;
         }
         String parentDir = FilePathUtils.extractParentDirectory(filePath);
         if (parentDir != null && !parentDir.isEmpty()) {
             client.mkdirs(parentDir);
+        }
+        return true;
+    }
+
+    /** 前操作 — READY/FLAG 检查 + 目录创建，返回 PipelineResult 兼容管线流。 */
+    private PipelineResult preCheckPath(FtpClient client, TransferConfig config,
+                                        ResolvedPath targetFile, PipelineOptions opts,
+                                        String filePath) {
+        if (!opts.enablePreCheck) return null;
+        if (!preCheckAndMkdirs(client, config, targetFile, filePath)) {
+            log.warn("Pre-check failed for {}", filePath);
+            updateDetailStatus(opts, ColumnNames.STATUS_SKIPPED);
+            return new PipelineResult(0, false, ColumnNames.STATUS_SKIPPED, filePath);
         }
         return null;
     }

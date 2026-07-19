@@ -16,6 +16,8 @@ import org.springframework.stereotype.Component;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 传输场景公共 Support — 上传 / 下载 Handler 共用的工具方法。
@@ -183,6 +185,41 @@ public class TransferSupport {
                 .replace("{dir}", fileInfo.dir() != null ? fileInfo.dir() : "")
                 .replace("{dn}", fileInfo.dn() != null ? fileInfo.dn() : "")
                 .replace("{up}", fileInfo.up() != null ? fileInfo.up() : "");
+    }
+
+    /**
+     * 安全关闭线程池：先 shutdown，等待指定超时，超时未终止则 shutdownNow。
+     *
+     * @param executor  待关闭的线程池
+     * @param timeout   等待时长
+     * @param unit      时间单位
+     * @param poolName  线程池名称（仅用于日志）
+     */
+    public static void shutdownExecutor(ExecutorService executor, long timeout,
+                                        TimeUnit unit, String poolName) {
+        if (executor == null) return;
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(timeout, unit)) {
+                log.warn("{} did not terminate within {} {}, forcing shutdown",
+                        poolName, timeout, unit);
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * 安全休眠 — 忽略中断后恢复中断标志，不抛异常。
+     */
+    public static void safeSleep(long ms) {
+        try {
+            TimeUnit.MILLISECONDS.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**

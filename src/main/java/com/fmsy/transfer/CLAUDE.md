@@ -9,8 +9,7 @@
 | 类 | 角色 |
 |---|------|
 | `TransferService` | 传输服务入口，按方向 + 命令类型分流 |
-| `TransferOrchestrator` | 编排器，按 scenario 显式 switch 到对应 Handler |
-| `AbstractTransferOrchestrator` | 模板方法：try-dispatch → catch → finalize → startChildMonitor |
+| `TransferOrchestrator` | 编排器，按 scenario 显式 switch 到对应 Handler（含 execute 模板） |
 
 ### 方向支持
 | 类 | 角色 |
@@ -49,7 +48,6 @@
 | `PlaceholderResolver` | 占位符解析 `{var}` 语法 |
 | `TempTransferConfigFactory` | T 类型指令的 temp_config JSON → TransferConfig |
 | `TransferHandler` | Handler 接口 |
-| `TransferUtils` | — |
 
 ## 设计要点
 - **COORDINATED(S) 类型的 DOWNLOAD_MULTI_NODE** 不由 TransferOrchestrator 处理，由 TransferService 直转 ChildBucketProcessor

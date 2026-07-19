@@ -27,7 +27,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -57,26 +56,39 @@ public class MergeFlowService {
 
     /**
      * 启动异步合并流程。
+     * <p>onSuccess / onError 由调用方(Handler)传入,包含指令表状态更新逻辑,
+     * 使终态更新代码在 Handler 中可见,便于排查。</p>
      *
      * @param mainCommandId 主命令 ID
      * @param config        传输配置
      * @param baseFileInfo  基础文件路径(已解析)
+     * @param onSuccess     合并成功回调(由 Handler 定义,通常置主命令为 Y)
+     * @param onError       合并失败回调(由 Handler 定义,通常置主命令为 E)
      */
-    public void startMergeAsync(Long mainCommandId, TransferConfig config, ResolvedPath baseFileInfo) {
+    public void startMergeAsync(Long mainCommandId, TransferConfig config, ResolvedPath baseFileInfo,
+                                Runnable onSuccess, Runnable onError) {
         abortFlags.put(mainCommandId, false);
         CompletableFuture.runAsync(() -> {
             LogUtils.setTaskId(mainCommandId);
             try {
                 boolean isSplitDownload = config.getSplitFields() != null
                         && !config.getSplitFields().isEmpty();
+                boolean ok;
                 if (isSplitDownload) {
-                    mergeSplitFiles(mainCommandId, config, baseFileInfo);
+                    ok = mergeSplitFiles(mainCommandId, config, baseFileInfo);
                 } else {
-                    mergeSingleFile(mainCommandId, config, baseFileInfo);
+                    ok = mergeSingleFile(mainCommandId, config, baseFileInfo);
                 }
-                log.info("Merge flow completed for command: {}", mainCommandId);
+                if (ok) {
+                    log.info("Merge flow completed for command: {}", mainCommandId);
+                    onSuccess.run();
+                } else {
+                    log.warn("Merge flow aborted for command: {}", mainCommandId);
+                    onError.run();
+                }
             } catch (Exception e) {
                 log.error("Merge flow failed for command {}: {}", mainCommandId, e.getMessage(), e);
+                onError.run();
             } finally {
                 abortFlags.remove(mainCommandId);
             }
@@ -85,7 +97,10 @@ public class MergeFlowService {
 
     // ==================== 单文件下发 ====================
 
-    private void mergeSingleFile(Long mainCommandId, TransferConfig config, ResolvedPath baseFileInfo) {
+    /**
+     * @return true=合并成功(所有桶已被 APPE 合并); false=合并终止(发现 E 桶或被中止)
+     */
+    private boolean mergeSingleFile(Long mainCommandId, TransferConfig config, ResolvedPath baseFileInfo) {
         String ftpName = config.getFtpName();
         String targetPath = baseFileInfo.fullPath();
         String parentDir = FilePathUtils.extractParentDirectory(targetPath);
@@ -100,12 +115,12 @@ public class MergeFlowService {
         boolean headerWritten = false;
 
         while (true) {
-            if (isAborted(mainCommandId)) break;
+            if (isAborted(mainCommandId)) return false;
 
             // 检查 E 桶 → 终止
             if (hasErrorBuckets(mainCommandId)) {
                 failRemaining(mainCommandId);
-                return;
+                return false;
             }
 
             List<Detail> ready = detailRepository.findBucketsByStatus(
@@ -135,16 +150,18 @@ public class MergeFlowService {
                 writeFooterToFile(ftpName, targetPath, converter, mapping);
                 writeFlagFile(ftpName, config, baseFileInfo, totalCount, "SUB");
                 writeFlagFile(ftpName, config, baseFileInfo, totalCount, "TOTAL");
-                updateMainStatus(mainCommandId, ColumnNames.STATUS_SUCCESS);
-                return;
+                return true;
             }
-            safeSleep(SystemConstants.MERGE_POLL_INTERVAL_MS);
+            TransferSupport.safeSleep(SystemConstants.MERGE_POLL_INTERVAL_MS);
         }
     }
 
     // ==================== 拆分下发 ====================
 
-    private void mergeSplitFiles(Long mainCommandId, TransferConfig config, ResolvedPath baseFileInfo) {
+    /**
+     * @return true=合并成功(所有拆分文件已被 APPE 合并); false=合并终止(发现 E 桶或被中止)
+     */
+    private boolean mergeSplitFiles(Long mainCommandId, TransferConfig config, ResolvedPath baseFileInfo) {
         String ftpName = config.getFtpName();
         String splitFields = config.getSplitFields();
         FieldMapping mapping = fieldMappingBuilder.buildForDownload(config);
@@ -153,11 +170,11 @@ public class MergeFlowService {
         Set<String> finalizedTargets = ConcurrentHashMap.newKeySet();
 
         while (true) {
-            if (isAborted(mainCommandId)) break;
+            if (isAborted(mainCommandId)) return false;
 
             if (hasErrorBuckets(mainCommandId)) {
                 failRemaining(mainCommandId);
-                return;
+                return false;
             }
 
             List<Detail> ready = detailRepository.findBucketsByStatus(
@@ -167,10 +184,9 @@ public class MergeFlowService {
                 if (isMergeDone(mainCommandId, mergedIds.size())) {
                     log.info("Merge[{}] all split files done", mainCommandId);
                     writeFlagFile(ftpName, config, baseFileInfo, 0, "TOTAL");
-                    updateMainStatus(mainCommandId, ColumnNames.STATUS_SUCCESS);
-                    return;
+                    return true;
                 }
-                safeSleep(SystemConstants.MERGE_POLL_INTERVAL_MS);
+                TransferSupport.safeSleep(SystemConstants.MERGE_POLL_INTERVAL_MS);
                 continue;
             }
 
@@ -182,8 +198,9 @@ public class MergeFlowService {
                 String fv = entry.getKey();
                 List<Detail> group = entry.getValue();
 
-                // 构建该组目标文件路径
-                String targetPath = resolveTargetPath(baseFileInfo.fullPath(), splitFields, fv);
+                // 构建该组目标文件路径(复用 TransferSupport 占位符解析)
+                Map<String, String> ctx = TransferSupport.splitFieldValues(splitFields, fv);
+                String targetPath = transferSupport.resolveFilePath(baseFileInfo.fullPath(), ctx).fullPath();
                 String parentDir = FilePathUtils.extractParentDirectory(targetPath);
                 String tempDir = (parentDir != null ? parentDir : "") + "/" + SystemConstants.TEMP_DIR_NAME;
 
@@ -355,39 +372,22 @@ public class MergeFlowService {
         return totalY <= mergedCount;
     }
 
-    /** 终止合并:标记未处理桶为跳过 */
+    /**
+     * 终止合并:标记未处理桶为跳过。
+     * 注意:此处只做合并内部清理(终止标志 + 桶跳过),
+     * 指令表状态(E)由 Handler 传入的 onError 回调处理。
+     */
     private void failRemaining(Long cmdId) {
         abortFlags.put(cmdId, true);
         int n = detailRepository.batchUpdateStatus(cmdId, ColumnNames.STATUS_EMPTY, ColumnNames.STATUS_SKIPPED);
         log.warn("Merge[{}] abort, skipped {} buckets", cmdId, n);
-        updateMainStatus(cmdId, ColumnNames.STATUS_ERROR);
-    }
-
-    private void updateMainStatus(Long cmdId, String status) {
-        commandRepository.updateStatus(cmdId, status);
-        log.info("Merge[{}] main command status -> {}", cmdId, status);
     }
 
     // ==================== 工具 ====================
-
-    /** 拆分字段值 → 目标文件路径(占位符替换) */
-    private static String resolveTargetPath(String template, String splitFields, String fieldValue) {
-        if (splitFields == null || fieldValue == null) return template;
-        String[] names = splitFields.split(",");
-        String[] values = fieldValue.split(",");
-        for (int i = 0; i < names.length && i < values.length; i++) {
-            template = template.replace("{" + names[i].trim() + "}", values[i].trim());
-        }
-        return template;
-    }
 
     /** 检查该命令是否被标记为终止 */
     private boolean isAborted(Long cmdId) {
         return Boolean.TRUE.equals(abortFlags.get(cmdId));
     }
 
-    private static void safeSleep(long ms) {
-        try { TimeUnit.MILLISECONDS.sleep(ms); }
-        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
     }
-}

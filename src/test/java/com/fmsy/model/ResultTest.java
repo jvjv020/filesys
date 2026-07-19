@@ -141,15 +141,12 @@ class ResultTest {
     class MarkChildrenCreatedTests {
 
         @Test
-        @DisplayName("should set suppressStatusUpdate and expectedChildren")
-        void shouldSetFlagsAndExpectedChildren() {
+        @DisplayName("should set status to PROCESSING")
+        void shouldSetStatusToProcessing() {
             Result result = new Result();
-            result.markChildrenCreated(5);
+            result.markChildrenCreated();
 
             assertEquals(ColumnNames.STATUS_PROCESSING, result.getResult());
-            assertTrue(result.isSuppressStatusUpdate());
-            assertEquals(5, result.getExpectedChildren());
-            assertTrue(result.isNeedsChildMonitor());
         }
     }
 
@@ -280,26 +277,5 @@ class ResultTest {
         }
     }
 
-    @Nested
-    @DisplayName("transient fields")
-    class TransientFieldsTests {
-
-        @Test
-        @DisplayName("suppressStatusUpdate should be false by default")
-        void suppressStatusUpdateShouldBeFalseByDefault() {
-            Result result = new Result();
-            // Use reflection to check the transient field since setter is private
-            assertFalse(extractSuppressStatusUpdate(result));
-        }
-
-        private boolean extractSuppressStatusUpdate(Result result) {
-            try {
-                var field = Result.class.getDeclaredField("suppressStatusUpdate");
-                field.setAccessible(true);
-                return field.getBoolean(result);
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        }
-    }
+    // suppressStatusUpdate 相关测试已移除 — 该字段不再存在,多节点下传走正常终态落库
 }

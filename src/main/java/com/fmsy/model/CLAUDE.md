@@ -20,11 +20,10 @@
 - `commandType` 用 `CommandType` 枚举，DB 存 code
 
 ### `Result`
-- 14 个持久化字段 + 3 个瞬态字段（`dbName` / `startTimeMs` / `suppressStatusUpdate`）
+- 14 个持久化字段 + 2 个瞬态字段（`dbName` / `startTimeMs`）
 - **使用 `Result.builder()` fluent API 构造**，替代 14 行 setter 链
-- `markChildrenCreated()` — MultiNode 成功时调用（抑制指令表终态落库）
+- `markChildrenCreated()` — MultiNode 成功时调用（置状态为 P，合并回调覆盖为 Y/E）
 - `markChildrenFailed(reason)` — MultiNode 失败时调用
-- `suppressStatusUpdate = true` 时 Orchestrator 跳过更新指令表
 
 ### `TransferConfig`
 - 不包含 `SQL_*` 常量，所有 SQL 在 Repository 层

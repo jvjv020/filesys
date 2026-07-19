@@ -15,8 +15,7 @@ import java.time.LocalDateTime;
  * <p>字段分两类:
  * <ul>
  *   <li><b>持久化字段(14 列)</b>:对应结果表,由 Orchestrator 调 ResultRepository 写入</li>
- *   <li><b>路由/瞬态字段</b>:{@code dbName}(选 JdbcTemplate)/ {@code startTimeMs}(耗时基准)/
- *       {@code suppressStatusUpdate}(MultiNode 抑制指令表更新)— 均不入表</li>
+ *   <li><b>路由/瞬态字段</b>:{@code dbName}(选 JdbcTemplate)/ {@code startTimeMs}(耗时基准)— 均不入表</li>
  * </ul>
  *
  * <p>典型用法(Orchestrator):
@@ -31,9 +30,7 @@ import java.time.LocalDateTime;
  * } finally {
  *     // Orchestrator 收尾:从 result 反查 elapsed,组装 Command/Config 派生字段,写库
  *     result.markEnd(command, config);
- *     if (!result.isSuppressStatusUpdate()) {
- *         commandRepository.updateStatus(command.getId(), result.getResult());
- *     }
+ *     commandRepository.updateStatus(command.getId(), result.getResult());
  *     resultWriter.write(result);
  * }
  * </pre>
@@ -83,27 +80,8 @@ public class Result {
     @Setter(AccessLevel.NONE)
     private transient long startTimeMs;
 
-    /**
-     * MultiNode Download 成功时设为 true:Orchestrator 跳过更新指令表和结果表,
-     * 由异步的 MergeFlowService 在合并完成后统一更新终态。
-     * 非结果表字段,仅 Orchestrator 内部使用。
-     */
-    @Setter(AccessLevel.NONE)
-    private transient boolean suppressStatusUpdate;
-
-    /**
-     * MultiNode 子命令监控需要 — markChildrenCreated 时设为 true，
-     * 表示需要启动异步的 ChildCommandMonitor 监控子命令完成。
-     */
-    @Setter(AccessLevel.NONE)
-    private transient boolean needsChildMonitor;
-
-    /**
-     * 期望的子命令数量 — MultiNode 创建子命令时记录，
-     * 供 ChildCommandMonitor 判断所有子命令是否已完成。
-     */
-    @Setter(AccessLevel.NONE)
-    private transient int expectedChildren;
+    // 无抑制状态更新字段 — 多节点下传走正常终态落库流程,
+    // 合并完成回调自动覆盖指令表状态为 Y 或 E
 
     // ==================== 生命周期方法(本类自洽,不依赖外部包) ====================
 
@@ -125,23 +103,10 @@ public class Result {
 
     /**
      * MultiNode Download 成功:子命令已创建,主命令保持 PROCESSING。
-     * Orchestrator 据此跳过指令表终态落库,由异步的 MergeFlowService
-     * 在分桶合并完成后统一更新终态。
+     * 合并完成回调会通过 onSuccess/onError 覆盖终态为 Y 或 E。
      */
     public void markChildrenCreated() {
         this.result = ColumnNames.STATUS_PROCESSING;
-        this.suppressStatusUpdate = true;
-        this.needsChildMonitor = true;
-    }
-
-    /**
-     * MultiNode Download 成功重载 — 同时记录期望的子命令数。
-     *
-     * @param expectedChildren 期望的子命令数,供 ChildCommandMonitor 判断完成条件
-     */
-    public void markChildrenCreated(int expectedChildren) {
-        markChildrenCreated();
-        this.expectedChildren = expectedChildren;
     }
 
     /**

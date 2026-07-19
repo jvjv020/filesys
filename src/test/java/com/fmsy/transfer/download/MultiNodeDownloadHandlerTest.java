@@ -4,6 +4,7 @@ import com.fmsy.enums.CommandType;
 import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
+import com.fmsy.repository.CommandRepository;
 import com.fmsy.transfer.BucketDistributor;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.ftp.FtpClient;
@@ -34,6 +35,15 @@ class MultiNodeDownloadHandlerTest {
 
     @Mock
     private FtpClient ftpClient;
+
+    @Mock
+    private SplitFlowService splitFlowService;
+
+    @Mock
+    private MergeFlowService mergeFlowService;
+
+    @Mock
+    private CommandRepository commandRepository;
 
     @InjectMocks
     private MultiNodeDownloadHandler handler;
@@ -124,42 +134,41 @@ class MultiNodeDownloadHandlerTest {
         }
 
         @Test
-        @DisplayName("should call prepareSerialChildren for SERIAL mode")
-        void shouldCallPrepareSerialChildren() throws Exception {
-            when(bucketDistributor.prepareSerialChildren(command, config, baseFileInfo.fullPath(), "REGION"))
-                    .thenReturn(3);
+        @DisplayName("should call splitSync + createChildCommands for SERIAL mode")
+        void shouldUseSplitSyncAndCreateChildCommands() throws Exception {
+            when(bucketDistributor.createChildCommands(command.getId(), "CAT001", "CTRL001",
+                    baseFileInfo.fullPath())).thenReturn(3);
 
             handler.handle(command, config, result);
 
-            verify(bucketDistributor).prepareSerialChildren(command, config,
-                    baseFileInfo.fullPath(), "REGION");
-            assertTrue(result.isNeedsChildMonitor());
-            assertEquals(3, result.getExpectedChildren());
+            verify(splitFlowService).splitSync(command.getId(), config);
+            verify(bucketDistributor).createChildCommands(command.getId(), "CAT001", "CTRL001",
+                    baseFileInfo.fullPath());
+            verify(mergeFlowService).startMergeAsync(eq(1L), eq(config), eq(baseFileInfo),
+                    any(Runnable.class), any(Runnable.class));
+            assertEquals(ColumnNames.STATUS_PROCESSING, result.getResult());
         }
 
         @Test
-        @DisplayName("should mark children failed when prepareSerialChildren returns 0")
+        @DisplayName("should mark children failed when splitSync + createChildCommands returns 0")
         void shouldMarkChildrenFailedWhenZeroChildren() throws Exception {
-            when(bucketDistributor.prepareSerialChildren(command, config, baseFileInfo.fullPath(), "REGION"))
-                    .thenReturn(0);
+            when(bucketDistributor.createChildCommands(command.getId(), "CAT001", "CTRL001",
+                    baseFileInfo.fullPath())).thenReturn(0);
 
             handler.handle(command, config, result);
 
             assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
-            assertFalse(result.isNeedsChildMonitor());
+            verify(mergeFlowService, never()).startMergeAsync(any(), any(), any(), any(), any());
         }
 
         @Test
         @DisplayName("should mark children created when children count > 0")
         void shouldMarkChildrenCreatedWhenChildrenExist() throws Exception {
-            when(bucketDistributor.prepareSerialChildren(command, config, baseFileInfo.fullPath(), "REGION"))
-                    .thenReturn(5);
+            when(bucketDistributor.createChildCommands(command.getId(), "CAT001", "CTRL001",
+                    baseFileInfo.fullPath())).thenReturn(5);
 
             handler.handle(command, config, result);
 
-            assertTrue(result.isNeedsChildMonitor());
-            assertTrue(result.isSuppressStatusUpdate());
-            assertEquals(5, result.getExpectedChildren());
             assertEquals(ColumnNames.STATUS_PROCESSING, result.getResult());
         }
     }
@@ -191,8 +200,9 @@ class MultiNodeDownloadHandlerTest {
 
             verify(bucketDistributor).prepareBatchChildren(command, config,
                     baseFileInfo.fullPath(), "REGION");
-            assertTrue(result.isNeedsChildMonitor());
-            assertEquals(2, result.getExpectedChildren());
+            verify(mergeFlowService).startMergeAsync(eq(1L), eq(config), eq(baseFileInfo),
+                    any(Runnable.class), any(Runnable.class));
+            assertEquals(ColumnNames.STATUS_PROCESSING, result.getResult());
         }
 
         @Test
@@ -204,6 +214,7 @@ class MultiNodeDownloadHandlerTest {
             handler.handle(command, config, result);
 
             assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
+            verify(mergeFlowService, never()).startMergeAsync(any(), any(), any(), any(), any());
         }
     }
 }

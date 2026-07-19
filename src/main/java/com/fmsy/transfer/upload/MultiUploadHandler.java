@@ -9,7 +9,6 @@ import com.fmsy.model.TransferConfig;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
-import com.fmsy.transfer.TransferUtils;
 import com.fmsy.util.BooleanUtils;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
@@ -383,7 +382,7 @@ public class MultiUploadHandler implements TransferHandler {
     // ==================== 通用工具 ====================
 
     private static void shutdownExecutor(ExecutorService executor) {
-        TransferUtils.shutdownExecutor(executor, 1, TimeUnit.MINUTES, "Upload executor");
+        TransferSupport.shutdownExecutor(executor, 1, TimeUnit.MINUTES, "Upload executor");
     }
 
 }

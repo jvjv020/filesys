@@ -5,6 +5,7 @@ import com.fmsy.db.PartitionHelper;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.TargetTableRepository;
+import com.fmsy.transfer.TransferSupport;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -21,11 +22,11 @@ import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntFunction;
 
 /**
  * 并行文件生成器 — 按分区并行读取数据库并写入临时文件,主线程流水线式拼接。
@@ -51,13 +52,16 @@ public class ParallelFileGenerator {
     private final TargetTableRepository targetTableRepository;
     private final PartitionHelper partitionHelper;
     private final int parallelThreads;
+    private final IntFunction<ExecutorService> batchExecutorFactory;
 
     public ParallelFileGenerator(TargetTableRepository targetTableRepository,
                                   PartitionHelper partitionHelper,
-                                  com.fmsy.config.AppConfig appConfig) {
+                                  com.fmsy.config.AppConfig appConfig,
+                                  IntFunction<ExecutorService> batchExecutorFactory) {
         this.targetTableRepository = targetTableRepository;
         this.partitionHelper = partitionHelper;
         this.parallelThreads = appConfig.getDownload().getParallelThreads();
+        this.batchExecutorFactory = batchExecutorFactory;
     }
 
     /**
@@ -131,7 +135,7 @@ public class ParallelFileGenerator {
             return generateSerial(output, config, converter, mapping, preCountedRecords);
         }
 
-        ExecutorService executor = Executors.newFixedThreadPool(parallelThreads);
+        ExecutorService executor = batchExecutorFactory.apply(parallelThreads);
         AtomicInteger totalCount = new AtomicInteger(0);
         AtomicBoolean anyFailed = new AtomicBoolean(false);
         List<Path> tempFiles = new ArrayList<>(partitions.size());
@@ -159,6 +163,7 @@ public class ParallelFileGenerator {
             }));
         }
 
+        // 关闭线程池，不再接受新任务（已在运行的任务继续执行）
         executor.shutdown();
 
         // === Phase 2: 写 header ===
@@ -216,15 +221,8 @@ public class ParallelFileGenerator {
             log.info("Parallel[{}] completed: {} partitions, {} records", tag, partitions.size(), totalCount.get());
         }
 
-        executor.shutdownNow();
-        try {
-            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
-                log.warn("Parallel[{}] some partition threads did not terminate within 5s", tag);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.warn("Parallel[{}] interrupted while waiting for partition thread termination", tag);
-        }
+        // 关闭线程池，强制终止仍在运行的任务
+        TransferSupport.shutdownExecutor(executor, 5, TimeUnit.SECONDS, "ParallelFileGenerator");
         cleanupTempDir(tempDir);
         return totalCount.get();
     }
