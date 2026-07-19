@@ -4,12 +4,10 @@ import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.CommandType;
 import com.fmsy.enums.EmptyDataHandling;
-import com.fmsy.exception.FlagCheckException;
 import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.DetailRepository;
-import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
@@ -34,6 +32,9 @@ import static org.mockito.Mockito.*;
 
 /**
  * SingleUploadHandler 重构后测试 — 使用纯方法组合。
+ *
+ * <p>uploadSupport 是 @Mock，因此 safeExecuteFilePipeline 需要显式 mock 返回值，
+ * 管线内部的 preCheck/insertDataAndVerify/postProcess 不会被真实调用。
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -55,9 +56,6 @@ class SingleUploadHandlerTest {
     @Mock
     private FileConverter fileConverter;
 
-    @Mock
-    private FieldMappingBuilder fieldMappingBuilder;
-
     private SingleUploadHandler handler;
 
     private Command command;
@@ -65,9 +63,16 @@ class SingleUploadHandlerTest {
     private Result result;
     private ResolvedPath fileInfo;
 
+    /** 返回指定 records 和 status 的 safeExecuteFilePipeline mock */
+    private UploadSupport.UploadResult mockPipelineResult(int records, String status) {
+        int failed = ColumnNames.STATUS_ERROR.equals(status) ? 1 : 0;
+        int skipped = ColumnNames.STATUS_SKIPPED.equals(status) ? 1 : 0;
+        return new UploadSupport.UploadResult(records, 0, skipped, failed, status);
+    }
+
     @BeforeEach
     void setUp() throws Exception {
-        handler = new SingleUploadHandler(detailRepository, uploadSupport, transferSupport, fieldMappingBuilder);
+        handler = new SingleUploadHandler(detailRepository, uploadSupport, transferSupport);
 
         command = new Command();
         command.setId(1L);
@@ -96,12 +101,8 @@ class SingleUploadHandlerTest {
         @DisplayName("应设置 SKIPPED 状态")
         void shouldSetSkippedWhenPreCheckReturnsFalse() throws Exception {
             when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-            doAnswer(invocation -> {
-                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
-                        return cb.run(mock(com.fmsy.ftp.FtpClient.class));
-                    }).when(transferSupport).executeWithClient(eq("ftp1"), any());
-            when(uploadSupport.preCheck(any(), any(), any(), anyString()))
-                    .thenReturn(new UploadSupport.UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED));
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+                    .thenReturn(mockPipelineResult(0, ColumnNames.STATUS_SKIPPED));
 
             handler.handle(command, config, result);
 
@@ -119,12 +120,8 @@ class SingleUploadHandlerTest {
         @BeforeEach
         void setup() throws Exception {
             when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-            doAnswer(invocation -> {
-                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
-                        return cb.run(mock(com.fmsy.ftp.FtpClient.class));
-                    }).when(transferSupport).executeWithClient(eq("ftp1"), any());
-            when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
-            when(uploadSupport.insertDataAndVerify(any(), any(), any(ResolvedPath.class), any(), anyString(), any())).thenReturn(100);
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+                    .thenReturn(mockPipelineResult(100, null));
         }
 
         @Test
@@ -137,17 +134,14 @@ class SingleUploadHandlerTest {
         }
 
         @Test
-        @DisplayName("清表标志为 Y 时在 preCheck 后、落库前调用 truncateTable")
+        @DisplayName("清表标志为 Y 时在 safeExecuteFilePipeline 前调用 truncateTable")
         void shouldTruncateAfterPreCheckBeforeInsert() throws Exception {
             config.setClearTableFlag("Y");
 
             handler.handle(command, config, result);
 
-            // 验证执行顺序：preCheck → truncate → insert（前稽核已合并到 insertDataAndVerify 中）
-            verify(uploadSupport).preCheck(any(), any(), any(), anyString());
             verify(uploadSupport).truncateTable(config);
-            verify(uploadSupport).insertDataAndVerify(any(), any(), any(ResolvedPath.class), any(), anyString(), any());
-            verify(uploadSupport).postProcess(any(), any(), any(ResolvedPath.class), eq(100));
+            verify(uploadSupport).safeExecuteFilePipeline(any(), any(), any(), any(), any());
         }
     }
 
@@ -160,35 +154,13 @@ class SingleUploadHandlerTest {
         @BeforeEach
         void setup() {
             when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+                    .thenReturn(mockPipelineResult(0, ColumnNames.STATUS_ERROR));
         }
 
         @Test
-        @DisplayName("insertDataAndVerify 失败应设置 ERROR 并迁文件")
-        @SuppressWarnings("unchecked")
-        void shouldSetErrorOnInsertFailure() throws Exception {
-            doAnswer(invocation -> {
-                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
-                        return cb.run(mock(com.fmsy.ftp.FtpClient.class));
-                    }).when(transferSupport).executeWithClient(eq("ftp1"), any());
-            when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
-            when(uploadSupport.insertDataAndVerify(any(), any(), any(ResolvedPath.class), any(), anyString(), any()))
-                    .thenThrow(new RuntimeException("Pre-audit failed: expected 100, got 50"));
-
-            handler.handle(command, config, result);
-
-            assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
-        }
-
-        @Test
-        @DisplayName("FlagCheckException 应设置 ERROR 并迁文件")
-        void shouldSetErrorOnFlagCheckException() throws Exception {
-            doAnswer(invocation -> {
-                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
-                        return cb.run(mock(com.fmsy.ftp.FtpClient.class));
-                    }).when(transferSupport).executeWithClient(eq("ftp1"), any());
-            when(uploadSupport.preCheck(any(), any(), any(), anyString()))
-                    .thenThrow(new FlagCheckException("FLAG mismatch"));
-
+        @DisplayName("管线内异常应设置 ERROR 状态")
+        void shouldSetErrorOnPipelineFailure() throws Exception {
             handler.handle(command, config, result);
 
             assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
@@ -205,12 +177,8 @@ class SingleUploadHandlerTest {
         @DisplayName("空文件且 handling=ALLOW，应 SUCCESS")
         void shouldBeSuccessWhenEmptyFileAndAllow() throws Exception {
             when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-            doAnswer(invocation -> {
-                        TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
-                        return cb.run(mock(com.fmsy.ftp.FtpClient.class));
-                    }).when(transferSupport).executeWithClient(eq("ftp1"), any());
-            when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
-            when(uploadSupport.insertDataAndVerify(any(), any(), any(ResolvedPath.class), any(), anyString(), any())).thenReturn(0);
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+                    .thenReturn(mockPipelineResult(0, null));
 
             config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
             handler.handle(command, config, result);
@@ -250,13 +218,8 @@ class SingleUploadHandlerTest {
             when(transferSupport.buildContext(command, "REGION", "EAST")).thenReturn(context);
             when(transferSupport.resolveFilePath(config.getFilePath(), context))
                     .thenReturn(ResolvedPath.of("/data/20260615/data001.csv"));
-            doAnswer(inv -> {
-                TransferSupport.FtpClientCallback<?> cb = inv.getArgument(1);
-                return cb.run(mock(com.fmsy.ftp.FtpClient.class));
-            }).when(transferSupport).executeWithClient(eq("ftp1"), any());
-            when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
-            when(uploadSupport.insertDataAndVerify(any(), any(), any(ResolvedPath.class), any(), anyString(), any()))
-                    .thenReturn(100);
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+                    .thenReturn(mockPipelineResult(100, null));
 
             handler.handle(command, config, result);
 
@@ -291,20 +254,16 @@ class SingleUploadHandlerTest {
         }
 
         @Test
-        @DisplayName("preCheck 失败应设置 SKIPPED 并更新明细状态")
-        void shouldSkipWhenPreCheckFails() throws Exception {
+        @DisplayName("管线返回 SKIPPED 应更新明细状态为 SKIPPED")
+        void shouldSkipWhenPipelineSkipped() throws Exception {
             when(detailRepository.findUploadDetails(1L, ColumnNames.STATUS_EMPTY))
                     .thenReturn(Collections.singletonList(detail));
             Map<String, String> context = new HashMap<>();
             when(transferSupport.buildContext(command, "REGION", "EAST")).thenReturn(context);
             when(transferSupport.resolveFilePath(anyString(), any(Map.class)))
                     .thenReturn(ResolvedPath.of("/data/data001.csv"));
-            doAnswer(inv -> {
-                TransferSupport.FtpClientCallback<?> cb = inv.getArgument(1);
-                return cb.run(mock(com.fmsy.ftp.FtpClient.class));
-            }).when(transferSupport).executeWithClient(eq("ftp1"), any());
-            when(uploadSupport.preCheck(any(), any(), any(), anyString()))
-                    .thenReturn(new UploadSupport.UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED));
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+                    .thenReturn(mockPipelineResult(0, ColumnNames.STATUS_SKIPPED));
 
             handler.handle(command, config, result);
 
@@ -313,43 +272,16 @@ class SingleUploadHandlerTest {
         }
 
         @Test
-        @DisplayName("insert 失败应设置 ERROR 并更新明细状态")
-        void shouldSetErrorOnInsertFailure() throws Exception {
+        @DisplayName("管线返回 ERROR 应更新明细状态为 ERROR")
+        void shouldSetErrorOnPipelineError() throws Exception {
             when(detailRepository.findUploadDetails(1L, ColumnNames.STATUS_EMPTY))
                     .thenReturn(Collections.singletonList(detail));
             Map<String, String> context = new HashMap<>();
             when(transferSupport.buildContext(command, "REGION", "EAST")).thenReturn(context);
             when(transferSupport.resolveFilePath(anyString(), any(Map.class)))
                     .thenReturn(ResolvedPath.of("/data/data001.csv"));
-            doAnswer(inv -> {
-                TransferSupport.FtpClientCallback<?> cb = inv.getArgument(1);
-                return cb.run(mock(com.fmsy.ftp.FtpClient.class));
-            }).when(transferSupport).executeWithClient(eq("ftp1"), any());
-            when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
-            when(uploadSupport.insertDataAndVerify(any(), any(), any(ResolvedPath.class), any(), anyString(), any()))
-                    .thenThrow(new RuntimeException("Insert failed"));
-
-            handler.handle(command, config, result);
-
-            assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
-            verify(detailRepository).updateStatus(100L, ColumnNames.STATUS_ERROR, "node1");
-        }
-
-        @Test
-        @DisplayName("FlagCheckException 应设置 ERROR 并更新明细状态")
-        void shouldSetErrorOnFlagCheckException() throws Exception {
-            when(detailRepository.findUploadDetails(1L, ColumnNames.STATUS_EMPTY))
-                    .thenReturn(Collections.singletonList(detail));
-            Map<String, String> context = new HashMap<>();
-            when(transferSupport.buildContext(command, "REGION", "EAST")).thenReturn(context);
-            when(transferSupport.resolveFilePath(anyString(), any(Map.class)))
-                    .thenReturn(ResolvedPath.of("/data/data001.csv"));
-            doAnswer(inv -> {
-                TransferSupport.FtpClientCallback<?> cb = inv.getArgument(1);
-                return cb.run(mock(com.fmsy.ftp.FtpClient.class));
-            }).when(transferSupport).executeWithClient(eq("ftp1"), any());
-            when(uploadSupport.preCheck(any(), any(), any(), anyString()))
-                    .thenThrow(new FlagCheckException("FLAG mismatch"));
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+                    .thenReturn(mockPipelineResult(0, ColumnNames.STATUS_ERROR));
 
             handler.handle(command, config, result);
 

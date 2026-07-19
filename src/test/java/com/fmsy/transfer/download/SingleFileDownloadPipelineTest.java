@@ -6,7 +6,6 @@ import com.fmsy.converter.ConverterFactory;
 import com.fmsy.converter.FileConverter;
 import com.fmsy.enums.EmptyDataHandling;
 import com.fmsy.ftp.FtpClient;
-import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.Detail;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.TransferConfig;
@@ -41,7 +40,6 @@ class SingleFileDownloadPipelineTest {
     @Mock private AuditService auditService;
     @Mock private TargetTableRepository targetTableRepository;
     @Mock private DetailRepository detailRepository;
-    @Mock private FtpPool ftpPool;
     @Mock private TransferSupport transferSupport;
     @Mock private ConverterFactory converterFactory;
     @Mock private FieldMappingBuilder fieldMappingBuilder;
@@ -58,7 +56,7 @@ class SingleFileDownloadPipelineTest {
     @BeforeEach
     void setUp() {
         pipeline = new DownloadSupport(auditService, targetTableRepository, detailRepository,
-                ftpPool, transferSupport, converterFactory, fieldMappingBuilder, parallelFileGenerator);
+                transferSupport, converterFactory, fieldMappingBuilder, parallelFileGenerator);
         config = new TransferConfig();
         config.setFtpName(FTP);
         config.setFilePath(PATH);
@@ -76,8 +74,11 @@ class SingleFileDownloadPipelineTest {
     private void mockEmptyOk(int rc) {
         when(transferSupport.handleEmptyData(rc, config.getEmptyDataHandling())).thenReturn(true);
     }
-    private void mockFtp() {
-        when(ftpPool.getClient(FTP)).thenReturn(ftpClient);
+    private void mockFtp() throws Exception {
+        doAnswer(invocation -> {
+            TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+            return cb.run(ftpClient);
+        }).when(transferSupport).executeWithClient(eq(FTP), any());
     }
     private void mockWholeTableGen(int count) throws Exception {
         FieldMapping m = new FieldMapping();
@@ -215,7 +216,6 @@ class SingleFileDownloadPipelineTest {
             mockWholeTableGen(100);
             mockPreCheckOk();
             when(auditService.postAudit(AuditScenario.DOWNLOAD, FTP, "mytable", PATH, 100, "DB1")).thenReturn(false);
-            when(ftpPool.getClient(FTP)).thenReturn(ftpClient, mock(FtpClient.class));
 
             DownloadSupport.PipelineResult r = pipeline.executePipeline(FTP, config, targetFile, opts().build());
             assertEquals(ColumnNames.STATUS_ERROR, r.getStatus());
@@ -395,11 +395,11 @@ class SingleFileDownloadPipelineTest {
     class ExceptionHandling {
 
         @Test
-        @DisplayName("ftpPool.getClient throws -> ERROR")
-        void poolThrows() {
+        @DisplayName("executeWithClient throws -> ERROR")
+        void poolThrows() throws Exception {
             mockPreAudit(50);
             mockEmptyOk(50);
-            when(ftpPool.getClient(FTP)).thenThrow(new RuntimeException("pool"));
+            when(transferSupport.executeWithClient(eq(FTP), any())).thenThrow(new RuntimeException("pool"));
 
             var r = pipeline.executePipeline(FTP, config, targetFile,
                     DownloadSupport.PipelineOptions.builder()
@@ -410,11 +410,18 @@ class SingleFileDownloadPipelineTest {
         }
 
         @Test
-        @DisplayName("FTP exception -> client closed")
+        @DisplayName("FTP exception -> client closed via executeWithClient")
         void clientClosed() throws Exception {
             mockPreAudit(100);
             mockEmptyOk(100);
-            when(ftpPool.getClient(FTP)).thenReturn(ftpClient);
+            doAnswer(invocation -> {
+                TransferSupport.FtpClientCallback<?> cb = invocation.getArgument(1);
+                try {
+                    return cb.run(ftpClient);
+                } finally {
+                    ftpClient.close();
+                }
+            }).when(transferSupport).executeWithClient(eq(FTP), any());
             mockPreCheckOk();
             when(ftpClient.getOutputStream(PATH)).thenThrow(new RuntimeException("err"));
 

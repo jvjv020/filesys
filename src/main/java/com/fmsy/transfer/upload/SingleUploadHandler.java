@@ -62,6 +62,11 @@ public class SingleUploadHandler implements TransferHandler {
      */
     private void handleSingle(Command command, TransferConfig config, Result result) {
         ResolvedPath fileInfo = transferSupport.resolveFilePath(config.getFilePath(), command);
+        if (fileInfo == null) {
+            log.error("无法解析文件路径, command={}, filePath={}", command.getId(), config.getFilePath());
+            result.setOutcome(0, ColumnNames.STATUS_ERROR, "Invalid file path config");
+            return;
+        }
         String filePath = fileInfo.fullPath();
 
         // 清表（在 FTP 连接外执行）
@@ -71,7 +76,7 @@ public class SingleUploadHandler implements TransferHandler {
 
         var r = support.safeExecuteFilePipeline(
                 config.getFtpName(), filePath, fileInfo, config,
-                null, null, command.getAuditCount());
+                UploadSupport.UploadOptions.of(command.getAuditCount()));
 
         if (r.status() != null) {
             result.setOutcome(0, r.status(), "Upload " + r.status());
@@ -121,6 +126,12 @@ public class SingleUploadHandler implements TransferHandler {
         pathContext.put("FILE_NAME", fileName);
 
         ResolvedPath fileInfo = transferSupport.resolveFilePath(config.getFilePath(), pathContext);
+        if (fileInfo == null) {
+            log.error("无法解析 BATCH 文件路径, command={}, filePath={}", command.getId(), config.getFilePath());
+            detailRepository.updateStatus(detailId, ColumnNames.STATUS_ERROR, nodeId);
+            result.setOutcome(0, ColumnNames.STATUS_ERROR, "Invalid file path config");
+            return;
+        }
         String filePath = fileInfo.fullPath();
 
         // 3. 取明细稽核数（优先于 command 级）
@@ -135,12 +146,12 @@ public class SingleUploadHandler implements TransferHandler {
 
         var r = support.safeExecuteFilePipeline(
                 config.getFtpName(), filePath, fileInfo, config,
-                null, detail, auditCount);
+                new UploadSupport.UploadOptions(null, detail, auditCount));
 
         String status = r.status() != null ? r.status() : ColumnNames.STATUS_SUCCESS;
         detailRepository.updateStatus(detailId, status, nodeId);
 
-        if (status != ColumnNames.STATUS_SUCCESS) {
+        if (!ColumnNames.STATUS_SUCCESS.equals(status)) {
             result.setOutcome(0, status, "Upload " + status);
             return;
         }

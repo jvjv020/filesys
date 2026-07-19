@@ -76,4 +76,25 @@ public class CommandProcessingTracker {
         }
         return false;
     }
+
+    /**
+     * 设置主命令 ID（兼容旧测试）。
+     * @deprecated 使用 {@link #recordMainId(String, String)} 替代
+     */
+    @Deprecated
+    public void setMainCommandId(String mainId) {
+        recordMainId("node1", mainId);
+    }
+
+    /**
+     * 获取主命令 ID（兼容旧测试，返回第一个找到的）。
+     * @deprecated 使用 {@link #hasMainId(String, String)} 替代
+     */
+    @Deprecated
+    public String getMainCommandId() {
+        for (Set<String> ids : nodeMainIds.values()) {
+            if (!ids.isEmpty()) return ids.iterator().next();
+        }
+        return null;
+    }
 }

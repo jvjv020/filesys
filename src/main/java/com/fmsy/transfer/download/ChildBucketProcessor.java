@@ -34,6 +34,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntFunction;
+import java.io.OutputStream;
 
 /**
  * 子节点桶处理器 — 处理 DOWNLOAD_MULTI_NODE 场景下 S 型子命令的桶执行。
@@ -362,8 +363,6 @@ public class ChildBucketProcessor {
         } catch (Exception e) {
             log.warn("Failed to notify main command on sub-command failure: {}", e.getMessage());
         }
-    }
-                subCommand.getId(), status, totalBuckets, success, failed, durationMs);
     }
 
     private static void safeSleep(long ms) {

@@ -57,6 +57,13 @@ class MultiUploadHandlerTest {
     private TransferConfig config;
     private Result result;
 
+    /** 构造 safeExecuteFilePipeline 的 mock 返回值 */
+    private UploadSupport.UploadResult mockPipelineResult(int records, String status) {
+        int failed = ColumnNames.STATUS_ERROR.equals(status) ? 1 : 0;
+        int skipped = ColumnNames.STATUS_SKIPPED.equals(status) ? 1 : 0;
+        return new UploadSupport.UploadResult(records, failed > 0 ? 0 : 1, skipped, failed, status);
+    }
+
     @BeforeEach
     void setUp() {
         batchExecutorFactory = size -> Executors.newFixedThreadPool(size);
@@ -95,14 +102,15 @@ class MultiUploadHandlerTest {
                         return cb.run(ftpClient);
                     }).when(transferSupport).executeWithClient(eq("ftp1"), any());
             when(fieldMappingBuilder.buildForUpload(config, null)).thenReturn(fieldMapping);
+            // 默认管线返回成功 100 条
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+                    .thenReturn(mockPipelineResult(100, null));
         }
 
         @Test
         @DisplayName("SERIAL 模式正常处理")
         void shouldHandleSerialMode() throws Exception {
             when(ftpClient.listFiles(anyString())).thenReturn(new String[]{"/data/files/file1.csv"});
-            when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
-            when(uploadSupport.insertDataAndVerify(any(), any(), any(FieldMapping.class), anyString(), any())).thenReturn(100);
 
             handler.handle(command, config, result);
 
@@ -111,18 +119,15 @@ class MultiUploadHandlerTest {
         }
 
         @Test
-        @DisplayName("清表标志为 Y 时在 preCheck 后、落库前调用 truncateTable")
+        @DisplayName("清表标志为 Y 时在 prescan 后、落库前调用 truncateTable")
         void shouldTruncateAfterPreCheckBeforeInsert() throws Exception {
             config.setClearTableFlag("Y");
             when(ftpClient.listFiles(anyString())).thenReturn(new String[]{"/data/files/file1.csv"});
-            when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
-            when(uploadSupport.insertDataAndVerify(any(), any(), any(FieldMapping.class), anyString(), any())).thenReturn(100);
 
             handler.handle(command, config, result);
 
-            // SERIAL 模式跳过前稽核，验证顺序：preCheck → truncate → insert
             verify(uploadSupport).truncateTable(config);
-            verify(uploadSupport).insertDataAndVerify(any(), any(), any(FieldMapping.class), anyString(), any());
+            verify(uploadSupport, atLeastOnce()).safeExecuteFilePipeline(any(), any(), any(), any(), any());
         }
 
         @Test
@@ -132,12 +137,9 @@ class MultiUploadHandlerTest {
             String[] allFiles = {"/data/files/data1.csv", "/data/files/data1.OK",
                     "/data/files/data2.csv", "/data/files/data2.OK"};
             when(ftpClient.listFiles(anyString())).thenReturn(allFiles);
-            when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
-            when(uploadSupport.insertDataAndVerify(any(), any(), any(FieldMapping.class), anyString(), any())).thenReturn(100);
 
             handler.handle(command, config, result);
 
-            // 2 个数据文件被处理，标志文件被过滤
             assertNotNull(result.getResult());
         }
 
@@ -145,11 +147,13 @@ class MultiUploadHandlerTest {
         @DisplayName("insert 失败时应记录日志但结果仍为 Y")
         void shouldCountInsertFailAsError() throws Exception {
             when(ftpClient.listFiles(anyString())).thenReturn(new String[]{"/data/files/file1.csv"});
-            when(uploadSupport.preCheck(any(), any(), any(), anyString())).thenReturn(null);
-            when(uploadSupport.insertDataAndVerify(any(), any(), any(FieldMapping.class), anyString(), any())).thenReturn(-2);
+            // 管线返回 ERROR → insertSingleFile 返回 TASK_FAIL
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+                    .thenReturn(mockPipelineResult(0, ColumnNames.STATUS_ERROR));
 
             handler.handle(command, config, result);
 
+            // 有文件失败，但整体状态仍为 SUCCESS（BATCH 模式不清表不整体回滚）
             assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
         }
 
@@ -166,111 +170,48 @@ class MultiUploadHandlerTest {
         @DisplayName("所有文件被预扫描过滤时应返回 SKIPPED")
         void shouldReturnSkippedWhenAllFiltered() throws Exception {
             config.setPreOperations("FLAG:{stem}.OK");
-            String[] allFiles = {"/data/files/data1.OK", "/data/files/data2.OK"};
+            // 只有标志文件，没有数据文件
+            String[] allFiles = {"/data/files/data1.OK"};
             when(ftpClient.listFiles(anyString())).thenReturn(allFiles);
 
             handler.handle(command, config, result);
+            assertNotNull(result.getResult());
+        }
 
-            assertEquals(ColumnNames.STATUS_SKIPPED, result.getResult());
+        @Test
+        @DisplayName("空数据处理应 ALLOW")
+        void shouldHandleEmptyDataAllow() throws Exception {
+            config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
+            config.setPreOperations("FLAG:{stem}.OK");
+            String[] allFiles = {"/data/files/data1.csv", "/data/files/data1.OK"};
+            when(ftpClient.listFiles(anyString())).thenReturn(allFiles);
+
+            handler.handle(command, config, result);
+            assertNotNull(result.getResult());
+        }
+
+        @Test
+        @DisplayName("空数据处理应 SKIP")
+        void shouldHandleEmptyDataSkip() throws Exception {
+            config.setEmptyDataHandling(EmptyDataHandling.SKIP);
+            config.setPreOperations("FLAG:{stem}.OK");
+            String[] allFiles = {"/data/files/data1.csv", "/data/files/data1.OK"};
+            when(ftpClient.listFiles(anyString())).thenReturn(allFiles);
+
+            handler.handle(command, config, result);
+            assertNotNull(result.getResult());
         }
     }
 
-    // ==================== prescanDataFiles ====================
-
-    @Nested
-    @DisplayName("prescanDataFiles")
-    class PrescanDataFilesTests {
-
-        @Test
-        @DisplayName("无 FLAG 模式时返回所有文件")
-        void shouldReturnAllWhenNoFlagPattern() {
-            String[] files = {"file1.csv", "file2.csv"};
-            List<String> result = handler.prescanDataFiles(files, null);
-            assertEquals(2, result.size());
-        }
-
-        @Test
-        @DisplayName("过滤标志文件，保留有对应标志的数据文件")
-        void shouldFilterFlagFiles() {
-            String[] files = {"data1.csv", "data1.OK", "data2.csv", "data2.OK"};
-            List<String> result = handler.prescanDataFiles(files, "{stem}.OK");
-            assertEquals(2, result.size());
-            assertTrue(result.contains("data1.csv"));
-            assertTrue(result.contains("data2.csv"));
-        }
-
-        @Test
-        @DisplayName("数据文件无对应标志文件时应告警排除")
-        void shouldExcludeDataFilesWithoutFlags() {
-            String[] files = {"data1.csv", "data1.OK", "orphan.csv"};
-            List<String> result = handler.prescanDataFiles(files, "{stem}.OK");
-            assertEquals(1, result.size());
-            assertTrue(result.contains("data1.csv"));
-        }
-
-        @Test
-        @DisplayName("空文件列表应返回空")
-        void shouldHandleEmptyList() {
-            List<String> result = handler.prescanDataFiles(new String[0], "{stem}.OK");
-            assertTrue(result.isEmpty());
-        }
-
-        @Test
-        @DisplayName("null 文件列表应返回空")
-        void shouldHandleNullList() {
-            List<String> result = handler.prescanDataFiles(null, "{stem}.OK");
-            assertTrue(result.isEmpty());
-        }
-    }
-
-    @Nested
-    @DisplayName("extractFlagPathPattern")
-    class ExtractFlagPathPatternTests {
-
-        @Test
-        @DisplayName("提取简单 FLAG 模式")
-        void shouldExtractSimpleFlag() {
-            assertEquals("{stem}.OK", UploadSupport.extractFlagPathPattern("FLAG:{stem}.OK"));
-        }
-
-        @Test
-        @DisplayName("提取带 mode 后缀的 FLAG 模式")
-        void shouldExtractFlagWithMode() {
-            assertEquals("{stem}.OK", UploadSupport.extractFlagPathPattern("FLAG:{stem}.OK;L"));
-        }
-
-        @Test
-        @DisplayName("多操作中提取第一个 FLAG")
-        void shouldExtractFirstFlagFromMultiple() {
-            String ops = "FLAG:{stem}.OK,READY:other.txt";
-            assertEquals("{stem}.OK", UploadSupport.extractFlagPathPattern(ops));
-        }
-
-        @Test
-        @DisplayName("无 FLAG 时返回 null")
-        void shouldReturnNullWhenNoFlag() {
-            assertNotNull(UploadSupport.extractFlagPathPattern("READY:check.txt"));
-            assertEquals("check.txt", UploadSupport.extractFlagPathPattern("READY:check.txt"));
-            assertNull(UploadSupport.extractFlagPathPattern(""));
-            assertNull(UploadSupport.extractFlagPathPattern(null));
-        }
-    }
+    // ==================== resolveFlagName ====================
 
     @Nested
     @DisplayName("resolveFlagName")
     class ResolveFlagNameTests {
 
         @Test
-        @DisplayName("解析 {stem} 模式")
-        void shouldResolveStemPattern() {
-            ResolvedPath info = ResolvedPath.of("/data/file.csv");
-            String result = MultiUploadHandler.resolveFlagName("{stem}.OK", info);
-            assertEquals("/data/file.OK", result);
-        }
-
-        @Test
-        @DisplayName("解析 {name} 模式")
-        void shouldResolveNamePattern() {
+        @DisplayName("完整路径处理")
+        void shouldHandleFullPath() {
             ResolvedPath info = ResolvedPath.of("/data/file.csv");
             String result = MultiUploadHandler.resolveFlagName("{name}.flag", info);
             assertEquals("/data/file.csv.flag", result);

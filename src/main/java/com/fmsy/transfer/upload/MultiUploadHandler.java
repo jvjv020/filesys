@@ -162,7 +162,7 @@ public class MultiUploadHandler implements TransferHandler {
             TransferConfig config, FieldMapping mapping, Integer auditCount) {
         var r = support.safeExecuteFilePipeline(
                 ftpName, filePath, fileInfo, config,
-                mapping, null, auditCount);
+                new UploadSupport.UploadOptions(mapping, null, auditCount));
         if (ColumnNames.STATUS_ERROR.equals(r.status())) return TASK_FAIL;
         return r.records(); // 0 for SKIPPED, >0 for SUCCESS
     }
@@ -283,8 +283,8 @@ public class MultiUploadHandler implements TransferHandler {
         for (String f : dataFiles) {
             ResolvedPath fileInfo = ResolvedPath.of(f);
             String expectedFlagName = resolveFlagName(flagPattern, fileInfo);
-            String expectedFlagFileName = ResolvedPath.of(expectedFlagName) != null
-                    ? ResolvedPath.of(expectedFlagName).name() : null;
+            ResolvedPath expectedPath = ResolvedPath.of(expectedFlagName);
+            String expectedFlagFileName = expectedPath != null ? expectedPath.name() : null;
 
             if (flagNames.remove(expectedFlagFileName)) {
                 validDataFiles.add(f);

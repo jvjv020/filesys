@@ -4,7 +4,6 @@ import com.fmsy.audit.AuditScenario;
 import com.fmsy.audit.AuditService;
 import com.fmsy.converter.ConverterFactory;
 import com.fmsy.ftp.FtpClient;
-import com.fmsy.ftp.FtpPool;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.TargetTableRepository;
@@ -38,9 +37,6 @@ class DownloadSupportTest {
     private DetailRepository detailRepository;
 
     @Mock
-    private FtpPool ftpPool;
-
-    @Mock
     private TransferSupport transferSupport;
 
     @Mock
@@ -60,7 +56,7 @@ class DownloadSupportTest {
     @BeforeEach
     void setUp() {
         downloadSupport = new DownloadSupport(auditService, targetTableRepository, detailRepository,
-                ftpPool, transferSupport, converterFactory, fieldMappingBuilder, parallelFileGenerator);
+                transferSupport, converterFactory, fieldMappingBuilder, parallelFileGenerator);
     }
 
     @Nested

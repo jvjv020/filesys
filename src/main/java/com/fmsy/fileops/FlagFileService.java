@@ -332,7 +332,7 @@ public class FlagFileService {
      * 规范化路径中的 ".." 段。
      * 例如: /data/export/BR001/../all.flg → /data/export/all.flg
      */
-    static String normalizePath(String path) {
+    public static String normalizePath(String path) {
         if (path == null || !path.contains("..")) return path;
         String[] segments = path.split("/");
         ArrayList<String> result = new ArrayList<>();

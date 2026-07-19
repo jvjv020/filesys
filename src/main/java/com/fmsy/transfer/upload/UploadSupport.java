@@ -192,37 +192,35 @@ public class UploadSupport {
     /**
      * 单文件上传管线 — preCheck → insertDataAndVerify → postProcess。
      *
-     * <p>
-     * 不包含 truncateTable（由调用方在适当时机执行）。
-     * mapping 和 detailContext 二选一：
+     * <p>不包含 truncateTable（由调用方在适当时机执行）。
+     * mapping 和 detailContext 通过 {@link UploadOptions} 传入，二选一：
      * <ul>
-     *   <li>mapping != null — 使用预构建的 FieldMapping（多文件并行场景）</li>
+     *   <li>prebuiltMapping != null — 使用预构建的 FieldMapping（多文件并行场景）</li>
      *   <li>detailContext != null — 使用明细行上下文构建 FieldMapping（BATCH 场景）</li>
      *   <li>两者都 null — 自动构建 FieldMapping（SERIAL 单文件场景）</li>
      * </ul>
      *
-     * @param client        已借出的 FTP 客户端
-     * @param config        传输配置
-     * @param fileInfo      数据文件路径信息
-     * @param filePath      数据文件完整路径
-     * @param mapping       预构建的 FieldMapping（可为 null）
-     * @param detailContext 明细上下文（可为 null）
-     * @param auditCount    稽核数（可为 null）
+     * @param client   已借出的 FTP 客户端
+     * @param config   传输配置
+     * @param fileInfo 数据文件路径信息
+     * @param filePath 数据文件完整路径
+     * @param opts     上传选项（mapping/detailContext/auditCount）
      * @return 上传结果
      */
     public UploadResult executeFilePipeline(FtpClient client, TransferConfig config,
-            ResolvedPath fileInfo, String filePath,
-            FieldMapping mapping, Map<String, Object> detailContext,
-            Integer auditCount) {
+            ResolvedPath fileInfo, String filePath, UploadOptions opts) {
 
         // Phase 1: preCheck
         UploadResult checkResult = preCheck(client, config, fileInfo, filePath);
         if (checkResult != null) return checkResult;
 
         // Phase 2: insert + verify
-        int count = (mapping != null)
-                ? insertDataAndVerify(client, config, mapping, filePath, auditCount)
-                : insertDataAndVerify(client, config, fileInfo, detailContext, filePath, auditCount);
+        int count;
+        if (opts.prebuiltMapping() != null) {
+            count = insertDataAndVerify(client, config, opts.prebuiltMapping(), filePath, opts.auditCount());
+        } else {
+            count = insertDataAndVerify(client, config, fileInfo, opts.detailContext(), filePath, opts.auditCount());
+        }
 
         // Phase 3: postProcess
         postProcess(client, config, fileInfo, count);
@@ -241,24 +239,20 @@ public class UploadSupport {
      *   <li>status=ERROR — 异常，文件已迁移到 error 目录</li>
      * </ul>
      *
-     * @param ftpName       FTP 连接名
-     * @param filePath      数据文件完整路径
-     * @param fileInfo      数据文件路径信息
-     * @param config        传输配置
-     * @param mapping       预构建的 FieldMapping（可为 null）
-     * @param detailContext 明细上下文（可为 null）
-     * @param auditCount    稽核数（可为 null）
+     * @param ftpName  FTP 连接名
+     * @param filePath 数据文件完整路径
+     * @param fileInfo 数据文件路径信息
+     * @param config   传输配置
+     * @param opts     上传选项（mapping/detailContext/auditCount）
      * @return 上传结果
      */
     public UploadResult safeExecuteFilePipeline(String ftpName, String filePath,
-            ResolvedPath fileInfo, TransferConfig config,
-            FieldMapping mapping, Map<String, Object> detailContext,
-            Integer auditCount) {
+            ResolvedPath fileInfo, TransferConfig config, UploadOptions opts) {
         try {
             return transferSupport.executeWithClient(ftpName, client ->
-                    executeFilePipeline(client, config, fileInfo, filePath,
-                            mapping, detailContext, auditCount));
-        } catch (RuntimeException e) {
+                    executeFilePipeline(client, config, fileInfo, filePath, opts));
+        } catch (Exception e) {
+            log.error("safeExecuteFilePipeline error for {}: {}", filePath, e.getMessage(), e);
             moveDataAndFlagToErrorDir(ftpName, filePath, config);
             return new UploadResult(0, 0, 0, 1, ColumnNames.STATUS_ERROR);
         }
@@ -477,7 +471,40 @@ public class UploadSupport {
         return FlagFileService.normalizePath(resolved);
     }
 
-    // ==================== 跨场景主状态判定 ====================
+    /**
+     * 规范化路径中的 ".." 段 — 委托给 {@link FlagFileService#normalizePath}。
+     *
+     * @deprecated 直接使用 {@link FlagFileService#normalizePath}
+     */
+    @Deprecated
+    public static String normalizePathSlashes(String path) {
+        return FlagFileService.normalizePath(path);
+    }
+
+    // ==================== 管线选项 / 结果 ====================
+
+    /**
+     * 上传管线选项 — 封装 {@link #executeFilePipeline} 和 {@link #safeExecuteFilePipeline} 的可选参数。
+     *
+     * <p>与下载侧的 {@code PipelineOptions} 对应，控制 mapping、detailContext 和 auditCount。
+     * 三个字段可任意组合：
+     * <ul>
+     *   <li>prebuiltMapping != null — 使用预构建的 FieldMapping（多文件并行场景）</li>
+     *   <li>detailContext != null — 使用明细行上下文构建 FieldMapping（BATCH 场景）</li>
+     *   <li>两者都 null — 自动构建</li>
+     *   <li>auditCount — 可为 null（跳过前稽核）</li>
+     * </ul>
+     *
+     * @param prebuiltMapping 预构建的字段映射（可为 null）
+     * @param detailContext   明细行上下文（可为 null，用于构建 extraFields）
+     * @param auditCount      期望稽核数（可为 null，null=跳过稽核）
+     */
+    public record UploadOptions(FieldMapping prebuiltMapping, Map<String, Object> detailContext,
+            Integer auditCount) {
+        public static UploadOptions of(Integer auditCount) {
+            return new UploadOptions(null, null, auditCount);
+        }
+    }
 
     /**
      * 单文件上传结果。
