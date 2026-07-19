@@ -14,7 +14,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -62,25 +61,11 @@ public class TransferSupport {
 
     /**
      * 将两个逗号分隔字符串按位置一一对应解析为 Map。
-     * 例如: splitFieldValues("REGION,STATUS", "EAST,ACTIVE")
-     * → {"REGION" -> "EAST", "STATUS" -> "ACTIVE"}
+     * 委托给 {@link SplitFieldHelper#toMap}。
+     * <p>例如: splitFieldValues("REGION,STATUS", "EAST,ACTIVE") → {"REGION" -> "EAST", "STATUS" -> "ACTIVE"}</p>
      */
     public static Map<String, String> splitFieldValues(String names, String values) {
-        Map<String, String> result = new LinkedHashMap<>();
-        if (names == null || names.isEmpty() || values == null || values.isEmpty()) {
-            return result;
-        }
-        String[] nameArr = names.split(",");
-        String[] valueArr = values.split(",");
-        int len = Math.min(nameArr.length, valueArr.length);
-        for (int i = 0; i < len; i++) {
-            String n = nameArr[i].trim();
-            String v = valueArr[i].trim();
-            if (!n.isEmpty()) {
-                result.put(n, v);
-            }
-        }
-        return result;
+        return SplitFieldHelper.toMap(names, values);
     }
 
     /**
@@ -189,6 +174,7 @@ public class TransferSupport {
 
     /**
      * 安全关闭线程池：先 shutdown，等待指定超时，超时未终止则 shutdownNow。
+     * 委托给 {@link ThreadUtils#shutdownExecutor}。
      *
      * @param executor  待关闭的线程池
      * @param timeout   等待时长
@@ -197,29 +183,15 @@ public class TransferSupport {
      */
     public static void shutdownExecutor(ExecutorService executor, long timeout,
                                         TimeUnit unit, String poolName) {
-        if (executor == null) return;
-        executor.shutdown();
-        try {
-            if (!executor.awaitTermination(timeout, unit)) {
-                log.warn("{} did not terminate within {} {}, forcing shutdown",
-                        poolName, timeout, unit);
-                executor.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            executor.shutdownNow();
-        }
+        ThreadUtils.shutdownExecutor(executor, timeout, unit, poolName);
     }
 
     /**
      * 安全休眠 — 忽略中断后恢复中断标志，不抛异常。
+     * 委托给 {@link ThreadUtils#safeSleep}。
      */
     public static void safeSleep(long ms) {
-        try {
-            TimeUnit.MILLISECONDS.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        ThreadUtils.safeSleep(ms);
     }
 
     /**

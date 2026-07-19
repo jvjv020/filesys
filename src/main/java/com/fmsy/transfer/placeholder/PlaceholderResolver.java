@@ -1,5 +1,6 @@
 package com.fmsy.transfer.placeholder;
 
+import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.ResolvedPath;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -96,14 +97,7 @@ public class PlaceholderResolver {
     // ==================== Phase 2: 文件衍生类 ====================
 
     private String resolveFileInfo(String template, ResolvedPath fileInfo) {
-        String result = template;
-        if (fileInfo.stem() != null) result = result.replace("{stem}", fileInfo.stem());
-        if (fileInfo.name() != null) result = result.replace("{name}", fileInfo.name());
-        if (fileInfo.ext() != null) result = result.replace("{ext}", fileInfo.ext());
-        if (fileInfo.dir() != null) result = result.replace("{dir}", fileInfo.dir());
-        if (fileInfo.dn() != null) result = result.replace("{dn}", fileInfo.dn());
-        if (fileInfo.up() != null) result = result.replace("{up}", fileInfo.up());
-        return result;
+        return TransferSupport.expandPathVariables(template, fileInfo);
     }
 
     // ==================== Phase 3: 数据类 ====================

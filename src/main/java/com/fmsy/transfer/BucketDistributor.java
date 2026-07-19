@@ -13,9 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 
 /**
  * 桶分发器 - 用于DOWNLOAD_MULTI_NODE场景下的数据分桶
@@ -82,37 +80,12 @@ public class BucketDistributor {
      * 从目标表 streamQuery DISTINCT 拉分桶值,把多字段拼成 "v1,v2,..." 字符串。
      * 任一字段为 null 的行被丢弃(无法形成有效分桶)。
      *
+     * <p>委托给 {@link SplitFieldHelper#queryDistinctBuckets}。</p>
+     *
      * @return 分桶值列表(逗号分隔多字段)
      */
     public List<String> distinctBuckets(TransferConfig config) {
-        String splitFields = config.getSplitFields();
-        String[] rawNames = splitFields.split(",");
-        String[] fieldNames = new String[rawNames.length];
-        for (int i = 0; i < rawNames.length; i++) {
-            fieldNames[i] = rawNames[i].trim();
-        }
-        List<Map<String, Object>> distinctValues = targetTableRepository.querySmallResult(
-                config.getDbName(), config.getTableName(),
-                Arrays.asList(fieldNames), true,
-                null, null, Arrays.asList(fieldNames), null);
-        List<String> bucketValues = new ArrayList<>();
-        for (Map<String, Object> row : distinctValues) {
-            StringBuilder fv = new StringBuilder();
-            boolean allPresent = true;
-            for (int i = 0; i < fieldNames.length; i++) {
-                Object v = row.get(fieldNames[i]);
-                if (v == null) {
-                    allPresent = false;
-                    break;
-                }
-                if (i > 0) fv.append(',');
-                fv.append(v);
-            }
-            if (allPresent) {
-                bucketValues.add(fv.toString());
-            }
-        }
-        return bucketValues;
+        return SplitFieldHelper.queryDistinctBuckets(targetTableRepository, config);
     }
 
     /**

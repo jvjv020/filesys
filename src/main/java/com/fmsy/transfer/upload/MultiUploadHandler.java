@@ -118,7 +118,7 @@ public class MultiUploadHandler implements TransferHandler {
                     () -> insertSingleFile(ftpName, filePath, ResolvedPath.of(filePath),
                             config, sharedMapping, null)));
         }
-        shutdownExecutor(insertExecutor);
+        TransferSupport.shutdownExecutor(insertExecutor, 1, TimeUnit.MINUTES, "Upload executor");
 
         // 收集落库结果
         int totalRecords = 0;
@@ -379,10 +379,4 @@ public class MultiUploadHandler implements TransferHandler {
         });
     }
 
-    // ==================== 通用工具 ====================
-
-    private static void shutdownExecutor(ExecutorService executor) {
-        TransferSupport.shutdownExecutor(executor, 1, TimeUnit.MINUTES, "Upload executor");
     }
-
-}

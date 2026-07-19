@@ -5,6 +5,7 @@ import com.fmsy.db.JdbcTemplateWrapper;
 import com.fmsy.db.PartitionHelper;
 import com.fmsy.db.SqlBuilder;
 import com.fmsy.db.SqlStatement;
+import com.fmsy.transfer.SplitFieldHelper;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.SystemConstants;
 import lombok.extern.slf4j.Slf4j;
@@ -306,21 +307,7 @@ public class TargetTableRepository {
     }
 
     private static List<String> buildBucketPredicates(String splitField, String fieldValue, List<Object> params) {
-        String[] fieldNames = splitField.split(",");
-        String[] fieldValues = fieldValue.split(",");
-        if (fieldNames.length != fieldValues.length) {
-            throw new IllegalArgumentException("splitField and fieldValue count mismatch: " + splitField + " / " + fieldValue);
-        }
-        List<String> predicates = new ArrayList<>();
-        for (int i = 0; i < fieldNames.length; i++) {
-            String fieldName = fieldNames[i].trim();
-            if (fieldName.isEmpty()) {
-                throw new IllegalArgumentException("splitField contains empty field: " + splitField);
-            }
-            predicates.add(fieldName + " = ?");
-            params.add(fieldValues[i].trim());
-        }
-        return predicates;
+        return SplitFieldHelper.buildPredicates(splitField, fieldValue, params);
     }
 
     private static <T> List<T> listOrEmpty(List<T> values) {

@@ -6,13 +6,13 @@ import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.repository.DetailRepository;
 import com.fmsy.repository.TargetTableRepository;
+import com.fmsy.transfer.SplitFieldHelper;
 import com.fmsy.util.LogUtils;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -189,19 +189,12 @@ public class SplitFlowService {
 
     /** 拆分字段值 → WHERE 条件字符串(如 "REGION = ? AND STATUS = ?") */
     private String buildSplitWhere(String splitFields, String fieldValue) {
-        String[] names = splitFields.split(",");
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < names.length; i++) {
-            if (i > 0) sb.append(" AND ");
-            sb.append(names[i].trim()).append(" = ?");
-        }
-        return sb.toString();
+        return SplitFieldHelper.buildWhereClause(splitFields, fieldValue);
     }
 
     /** 拆分字段值 → 参数列表 */
     private List<Object> buildSplitParams(String splitFields, String fieldValue) {
-        String[] values = fieldValue.split(",");
-        return Arrays.stream(values).map(String::trim).collect(Collectors.toList());
+        return SplitFieldHelper.buildParams(splitFields, fieldValue);
     }
 
     /** 解析实际查询的表名列表(分区表返回分区子表,否则原表) */
@@ -232,23 +225,6 @@ public class SplitFlowService {
 
     /** 查询拆分字段的 DISTINCT 值列表 */
     private List<String> queryDistinctSplitValues(TransferConfig config) {
-        String[] fieldNames = config.getSplitFields().split(",");
-        List<Map<String, Object>> rows = targetTableRepository.querySmallResult(
-                config.getDbName(), config.getTableName(),
-                Arrays.asList(fieldNames), true,
-                null, null, Arrays.asList(fieldNames), null);
-        List<String> values = new ArrayList<>();
-        for (Map<String, Object> row : rows) {
-            StringBuilder fv = new StringBuilder();
-            boolean allPresent = true;
-            for (String name : fieldNames) {
-                Object v = row.get(name.trim());
-                if (v == null) { allPresent = false; break; }
-                if (fv.length() > 0) fv.append(',');
-                fv.append(v);
-            }
-            if (allPresent) values.add(fv.toString());
-        }
-        return values;
+        return SplitFieldHelper.queryDistinctBuckets(targetTableRepository, config);
     }
 }
