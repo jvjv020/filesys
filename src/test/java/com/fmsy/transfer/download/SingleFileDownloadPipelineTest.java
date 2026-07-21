@@ -102,12 +102,6 @@ class SingleFileDownloadPipelineTest {
     @DisplayName("Whole table")
     class WholeTable {
 
-        private DownloadSupport.PipelineOptions.PipelineOptionsBuilder opts() {
-            return DownloadSupport.PipelineOptions.builder()
-                    .wholeTable(true).expectedAuditCount(100)
-                    .enablePreCheck(true).enableOverwriteCheck(true).enablePostAudit(true);
-        }
-
         @Test
         @DisplayName("full pipeline success")
         void success() throws Exception {
@@ -120,11 +114,12 @@ class SingleFileDownloadPipelineTest {
             mockPostAuditOk(100);
             // overwriteFlag=Y -> checkOverwriteAllowed returns true without client calls
 
-            DownloadSupport.PipelineResult r = pipeline.executePipeline(FTP, config, targetFile, opts().build());
+            DownloadSupport.PipelineResult r = pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, 100, null, true, true, null, null);
 
-            assertTrue(r.isSuccess());
-            assertEquals(100, r.getRecordCount());
-            assertEquals(ColumnNames.STATUS_SUCCESS, r.getStatus());
+            assertTrue(r.success());
+            assertEquals(100, r.recordCount());
+            assertEquals(ColumnNames.STATUS_SUCCESS, r.status());
             verify(transferSupport).postProcess(eq(ftpClient), anyString(), eq(targetFile), any());
             verify(ftpClient).completePendingCommand();
         }
@@ -137,8 +132,9 @@ class SingleFileDownloadPipelineTest {
             mockFtp();
             when(transferSupport.preCheck(ftpClient, config, targetFile)).thenReturn(false);
 
-            DownloadSupport.PipelineResult r = pipeline.executePipeline(FTP, config, targetFile, opts().build());
-            assertEquals(ColumnNames.STATUS_SKIPPED, r.getStatus());
+            DownloadSupport.PipelineResult r = pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, 100, null, true, true, null, null);
+            assertEquals(ColumnNames.STATUS_SKIPPED, r.status());
         }
 
         @Test
@@ -152,8 +148,9 @@ class SingleFileDownloadPipelineTest {
             when(ftpClient.exists(PATH)).thenReturn(true);
             when(ftpClient.exists(PATH.replace(".csv", ".FLG"))).thenReturn(true);
 
-            DownloadSupport.PipelineResult r = pipeline.executePipeline(FTP, config, targetFile, opts().build());
-            assertEquals(ColumnNames.STATUS_ERROR, r.getStatus());
+            DownloadSupport.PipelineResult r = pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, 100, null, true, true, null, null);
+            assertEquals(ColumnNames.STATUS_ERROR, r.status());
         }
 
         @Test
@@ -161,8 +158,9 @@ class SingleFileDownloadPipelineTest {
         void preAuditFail() {
             when(auditService.preAudit(AuditScenario.DOWNLOAD, "mytable", 100, "DB1")).thenReturn(-1);
 
-            DownloadSupport.PipelineResult r = pipeline.executePipeline(FTP, config, targetFile, opts().build());
-            assertEquals(ColumnNames.STATUS_SKIPPED, r.getStatus());
+            DownloadSupport.PipelineResult r = pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, 100, null, true, true, null, null);
+            assertEquals(ColumnNames.STATUS_SKIPPED, r.status());
         }
 
         @Test
@@ -176,11 +174,11 @@ class SingleFileDownloadPipelineTest {
             mockPreCheckOk();
             mockPostAuditOk(50);
 
-            DownloadSupport.PipelineResult r = pipeline.executePipeline(FTP, config, targetFile,
-                    opts().expectedAuditCount(null).build());
+            DownloadSupport.PipelineResult r = pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, null, null, true, true, null, null);
 
-            assertTrue(r.isSuccess());
-            assertEquals(50, r.getRecordCount());
+            assertTrue(r.success());
+            assertEquals(50, r.recordCount());
             verify(targetTableRepository).count("DB1", "mytable");
         }
 
@@ -191,8 +189,9 @@ class SingleFileDownloadPipelineTest {
             when(auditService.preAudit(AuditScenario.DOWNLOAD, "mytable", 100, "DB1")).thenReturn(0);
             when(transferSupport.handleEmptyData(0, EmptyDataHandling.SKIP)).thenReturn(false);
 
-            DownloadSupport.PipelineResult r = pipeline.executePipeline(FTP, config, targetFile, opts().build());
-            assertEquals(ColumnNames.STATUS_SKIPPED, r.getStatus());
+            DownloadSupport.PipelineResult r = pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, 100, null, true, true, null, null);
+            assertEquals(ColumnNames.STATUS_SKIPPED, r.status());
         }
 
         @Test
@@ -202,8 +201,9 @@ class SingleFileDownloadPipelineTest {
             when(auditService.preAudit(AuditScenario.DOWNLOAD, "mytable", 100, "DB1")).thenReturn(0);
             when(transferSupport.handleEmptyData(0, EmptyDataHandling.ERROR)).thenReturn(false);
 
-            DownloadSupport.PipelineResult r = pipeline.executePipeline(FTP, config, targetFile, opts().build());
-            assertEquals(ColumnNames.STATUS_ERROR, r.getStatus());
+            DownloadSupport.PipelineResult r = pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, 100, null, true, true, null, null);
+            assertEquals(ColumnNames.STATUS_ERROR, r.status());
         }
 
         @Test
@@ -217,9 +217,10 @@ class SingleFileDownloadPipelineTest {
             mockPreCheckOk();
             when(auditService.postAudit(AuditScenario.DOWNLOAD, FTP, "mytable", PATH, 100, "DB1")).thenReturn(false);
 
-            DownloadSupport.PipelineResult r = pipeline.executePipeline(FTP, config, targetFile, opts().build());
-            assertEquals(ColumnNames.STATUS_ERROR, r.getStatus());
-            assertEquals(100, r.getRecordCount());
+            DownloadSupport.PipelineResult r = pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, 100, null, true, true, null, null);
+            assertEquals(ColumnNames.STATUS_ERROR, r.status());
+            assertEquals(100, r.recordCount());
         }
     }
 
@@ -240,12 +241,6 @@ class SingleFileDownloadPipelineTest {
                     .thenReturn(mock(TargetTableRepository.DataStream.class));
         }
 
-        private DownloadSupport.PipelineOptions.PipelineOptionsBuilder opts(String fv, Integer ac) {
-            return DownloadSupport.PipelineOptions.builder()
-                    .wholeTable(false).fieldValue(fv).expectedAuditCount(ac)
-                    .enablePreCheck(true).enableOverwriteCheck(false).enablePostAudit(true);
-        }
-
         @Test
         @DisplayName("with preAuditByBucket")
         void withPreAudit() throws Exception {
@@ -257,9 +252,11 @@ class SingleFileDownloadPipelineTest {
             mockPreCheckOk();
             mockPostAuditOk(50);
 
-            DownloadSupport.PipelineResult r = pipeline.executePipeline(FTP, config, targetFile, opts(FV, 50).build());
-            assertTrue(r.isSuccess());
-            assertEquals(50, r.getRecordCount());
+            DownloadSupport.PipelineResult r = pipeline.executeBucketPipeline(
+                    FTP, config, targetFile, FV, 50, null,
+                    true, true, null, null, null);
+            assertTrue(r.success());
+            assertEquals(50, r.recordCount());
             verify(targetTableRepository).streamBucketData("DB1", "mytable", "REGION", FV);
         }
 
@@ -273,9 +270,11 @@ class SingleFileDownloadPipelineTest {
             mockPreCheckOk();
             mockPostAuditOk(30);
 
-            DownloadSupport.PipelineResult r = pipeline.executePipeline(FTP, config, targetFile, opts(FV, null).build());
-            assertTrue(r.isSuccess());
-            assertEquals(30, r.getRecordCount());
+            DownloadSupport.PipelineResult r = pipeline.executeBucketPipeline(
+                    FTP, config, targetFile, FV, null, null,
+                    true, true, null, null, null);
+            assertTrue(r.success());
+            assertEquals(30, r.recordCount());
             verify(targetTableRepository).countByBucket("DB1", "mytable", "REGION", FV);
         }
 
@@ -288,9 +287,10 @@ class SingleFileDownloadPipelineTest {
             mockBucketGen(FV);
             mockPreCheckOk();
 
-            DownloadSupport.PipelineResult r = pipeline.executePipeline(FTP, config, targetFile,
-                    opts(FV, 50).enablePostAudit(false).build());
-            assertTrue(r.isSuccess());
+            DownloadSupport.PipelineResult r = pipeline.executeBucketPipeline(
+                    FTP, config, targetFile, FV, 50, null,
+                    true, false, null, null, null);
+            assertTrue(r.success());
             verify(auditService, never()).postAudit(any(), any(), any(), anyString(), anyInt(), anyString());
         }
 
@@ -303,9 +303,10 @@ class SingleFileDownloadPipelineTest {
             mockBucketGen(FV);
             mockPostAuditOk(50);
 
-            DownloadSupport.PipelineResult r = pipeline.executePipeline(FTP, config, targetFile,
-                    opts(FV, 50).enablePreCheck(false).build());
-            assertTrue(r.isSuccess());
+            DownloadSupport.PipelineResult r = pipeline.executeBucketPipeline(
+                    FTP, config, targetFile, FV, 50, null,
+                    false, true, null, null, null);
+            assertTrue(r.success());
             verify(transferSupport, never()).preCheck(any(), any(), any());
         }
     }
@@ -324,13 +325,6 @@ class SingleFileDownloadPipelineTest {
             d.setId(10L);
         }
 
-        private DownloadSupport.PipelineOptions.PipelineOptionsBuilder optsOver() {
-            return DownloadSupport.PipelineOptions.builder()
-                    .wholeTable(true).expectedAuditCount(50)
-                    .enablePreCheck(true).enableOverwriteCheck(true).enablePostAudit(true)
-                    .detail(d).nodeId("n1");
-        }
-
         @Test
         @DisplayName("success -> detail SUCCESS")
         void success() throws Exception {
@@ -342,7 +336,8 @@ class SingleFileDownloadPipelineTest {
             mockPreCheckOk();
             mockPostAuditOk(50);
 
-            pipeline.executePipeline(FTP, config, targetFile, optsOver().build());
+            pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, 50, null, true, true, d, "n1");
             verify(detailRepository).updateStatus(10L, "Y", "n1");
         }
 
@@ -354,7 +349,8 @@ class SingleFileDownloadPipelineTest {
             mockFtp();
             when(transferSupport.preCheck(ftpClient, config, targetFile)).thenReturn(false);
 
-            pipeline.executePipeline(FTP, config, targetFile, optsOver().build());
+            pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, 50, null, true, true, d, "n1");
             verify(detailRepository).updateStatus(10L, "N", "n1");
         }
 
@@ -367,7 +363,8 @@ class SingleFileDownloadPipelineTest {
             mockPreCheckOk();
             when(ftpClient.getOutputStream(PATH)).thenThrow(new RuntimeException("err"));
 
-            pipeline.executePipeline(FTP, config, targetFile, optsOver().build());
+            pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, 50, null, true, true, d, "n1");
             verify(detailRepository).updateStatus(10L, "E", "n1");
         }
 
@@ -383,7 +380,8 @@ class SingleFileDownloadPipelineTest {
             mockPreCheckOk();
             mockPostAuditOk(50);
 
-            pipeline.executePipeline(FTP, config, targetFile, optsOver().build());
+            pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, 50, null, true, true, d, "n1");
             verify(detailRepository, never()).updateStatus(anyLong(), anyString(), anyString());
         }
     }
@@ -401,12 +399,9 @@ class SingleFileDownloadPipelineTest {
             mockEmptyOk(50);
             when(transferSupport.executeWithClient(eq(FTP), any())).thenThrow(new RuntimeException("pool"));
 
-            var r = pipeline.executePipeline(FTP, config, targetFile,
-                    DownloadSupport.PipelineOptions.builder()
-                            .wholeTable(true).expectedAuditCount(50)
-                            .enablePreCheck(true).enableOverwriteCheck(false).enablePostAudit(true)
-                            .build());
-            assertEquals(ColumnNames.STATUS_ERROR, r.getStatus());
+            var r = pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, 50, null, false, true, null, null);
+            assertEquals(ColumnNames.STATUS_ERROR, r.status());
         }
 
         @Test
@@ -425,11 +420,8 @@ class SingleFileDownloadPipelineTest {
             mockPreCheckOk();
             when(ftpClient.getOutputStream(PATH)).thenThrow(new RuntimeException("err"));
 
-            pipeline.executePipeline(FTP, config, targetFile,
-                    DownloadSupport.PipelineOptions.builder()
-                            .wholeTable(true).expectedAuditCount(100)
-                            .enablePreCheck(true).enableOverwriteCheck(true).enablePostAudit(true)
-                            .build());
+            pipeline.executeWholeTablePipeline(
+                    FTP, config, targetFile, 100, null, true, true, null, null);
             verify(ftpClient).close();
         }
     }

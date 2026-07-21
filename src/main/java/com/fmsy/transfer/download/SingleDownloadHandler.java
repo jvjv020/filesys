@@ -1,6 +1,5 @@
 package com.fmsy.transfer.download;
 
-import com.fmsy.enums.EmptyDataHandling;
 import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
@@ -13,15 +12,21 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 /**
- * DOWNLOAD_SINGLE 场景:整表 → 单个 FTP 文件。
+ * DOWNLOAD_SINGLE 场景：整表数据 → 单个 FTP 文件。
  *
- * <p>显式编排各阶段:
- * <ol>
- *   <li>前稽核/计数 (DB-only)</li>
- *   <li>空数据处理</li>
- *   <li>FTP 会话:前操作 → 覆盖检查 → 生成文件 → 后操作</li>
- *   <li>后稽核</li>
- * </ol>
+ * <p>
+ * 委托 {@link DownloadSupport#executeWholeTablePipeline} 执行完整的单文件下载管线，
+ * 管线包含以下阶段：<br>
+ * 前稽核（可选）→ 空数据处理 →（FTP 会话：前操作 → 覆盖检查 → 文件生成 → 后操作）→ 后稽核（可选）
+ *
+ * <p>
+ * <b>覆盖检查</b>：默认启用（{@code enableOverwriteCheck=true}），
+ * 检查目标文件是否存在完成标志（*.FLG / *.DONE / *.READY / *.OK）。<br>
+ * <b>后稽核</b>：当 {@code auditCount} 非 null 且 &ge; 0 时启用，
+ * 文件行数与命令期望的稽核数比较，不一致时回滚删除已生成的 FTP 文件。
+ *
+ * <p>
+ * Handler 非常薄，仅做路径解析和管线结果映射，不直接操 FTP 连接。
  */
 @Slf4j
 @Component
@@ -37,71 +42,32 @@ public class SingleDownloadHandler implements TransferHandler {
                 command.getId(), config.getTableName());
         String ftpName = config.getFtpName();
         ResolvedPath fileInfo = transferSupport.resolveFilePath(config.getFilePath(), command);
-        String filePath = fileInfo != null ? fileInfo.fullPath() : null;
+
         boolean hasAudit = command.getAuditCount() != null && command.getAuditCount() >= 0;
 
-        // ===== Phase 1: 前稽核/计数 (DB-only) =====
-        int recordCount;
-        if (hasAudit) {
-            recordCount = downloadSupport.preAudit(config, command.getAuditCount());
-            if (recordCount < 0) {
-                log.warn("Pre-audit failed for {}, auditCount={}", filePath, command.getAuditCount());
-                result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-audit failed");
-                return;
-            }
-        } else {
-            recordCount = downloadSupport.countRecords(config);
+        DownloadSupport.PipelineResult pr = downloadSupport.executeWholeTablePipeline(
+                ftpName, config, fileInfo,
+                command.getAuditCount(), null,
+                true, hasAudit, null, null);
+
+        String description = deriveDescription(pr);
+        result.setOutcome(pr.recordCount(), pr.status(), description);
+    }
+
+    /**
+     * 将 PipelineResult 映射为 Result 的描述字符串 — 成功返回空字符串，
+     * SKIPPED/ERROR 附带文件路径作为描述。
+     *
+     * <p>
+     * 与上传的 {@code applyPipelineResult} 功能类似，但下载场景需要文件路径信息。
+     */
+    private static String deriveDescription(DownloadSupport.PipelineResult pr) {
+        if (pr.success())
+            return "";
+        String path = pr.filePath();
+        if (ColumnNames.STATUS_SKIPPED.equals(pr.status())) {
+            return path != null ? "Skipped for " + path : "Skipped";
         }
-
-        // ===== Phase 2: 空数据处理 =====
-        if (recordCount == 0) {
-            if (!transferSupport.handleEmptyData(0, config.getEmptyDataHandling())) {
-                String status = config.getEmptyDataHandling() == EmptyDataHandling.ERROR
-                        ? ColumnNames.STATUS_ERROR : ColumnNames.STATUS_SKIPPED;
-                log.warn("Empty data handling ({}) for {}", config.getEmptyDataHandling(), filePath);
-                result.setOutcome(0, status, "Empty data");
-                return;
-            }
-        }
-
-        // ===== Phase 3-5: FTP 传输 + 后稽核 =====
-        try {
-            transferSupport.executeWithClient(ftpName, client -> {
-                // 3a: 前操作
-                if (!downloadSupport.preCheckAndMkdirs(client, config, fileInfo, filePath)) {
-                    log.warn("Pre-check failed for {}", filePath);
-                    result.setOutcome(0, ColumnNames.STATUS_SKIPPED, "Pre-check failed");
-                    return null;
-                }
-
-                // 3b: 覆盖检查
-                if (!downloadSupport.checkOverwriteAllowed(client, filePath, config.getOverwriteFlag())) {
-                    log.warn("Overwrite denied for {}", filePath);
-                    result.setOutcome(0, ColumnNames.STATUS_ERROR, "Overwrite denied");
-                    return null;
-                }
-
-                // 3c: 生成文件(整表模式)
-                int count = downloadSupport.generateFile(client, config, true, null, null, recordCount, filePath);
-
-                // 3d: 后操作(全部类型)
-                downloadSupport.postProcess(client, config, fileInfo, count, null);
-
-                // Phase 4: 后稽核
-                if (hasAudit && !downloadSupport.postAudit(config, filePath, count)) {
-                    log.error("Post-audit failed for {}, rolling back file", filePath);
-                    DownloadSupport.rollbackAfterPostAuditFailure(client, filePath, "post-audit");
-                    result.setOutcome(count, ColumnNames.STATUS_ERROR, "Post-audit failed");
-                    return null;
-                }
-
-                log.info("Download completed: {}, records={}", filePath, count);
-                result.setOutcome(count, ColumnNames.STATUS_SUCCESS, "");
-                return null;
-            });
-        } catch (Exception e) {
-            log.error("Download failed for {}: {}", filePath, e.getMessage(), e);
-            result.setOutcome(0, ColumnNames.STATUS_ERROR, e.getMessage());
-        }
+        return path != null ? "Error for " + path : "Error";
     }
 }
