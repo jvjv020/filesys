@@ -76,13 +76,9 @@ public class SingleUploadHandler implements TransferHandler {
 
         var r = support.safeExecuteFilePipeline(
                 config.getFtpName(), filePath, fileInfo, config,
-                UploadSupport.UploadOptions.of(command.getAuditCount()));
+                null, null, command.getAuditCount());
 
-        if (r.status() != null) {
-            result.setOutcome(0, r.status(), "Upload " + r.status());
-            return;
-        }
-        result.setOutcome(r.records(), ColumnNames.STATUS_SUCCESS, "");
+        applyPipelineResult(result, r);
     }
 
     /**
@@ -146,7 +142,7 @@ public class SingleUploadHandler implements TransferHandler {
 
         var r = support.safeExecuteFilePipeline(
                 config.getFtpName(), filePath, fileInfo, config,
-                new UploadSupport.UploadOptions(null, detail, auditCount));
+                null, detail, auditCount);
 
         String status = r.status() != null ? r.status() : ColumnNames.STATUS_SUCCESS;
         detailRepository.updateStatus(detailId, status, nodeId);
@@ -157,4 +153,20 @@ public class SingleUploadHandler implements TransferHandler {
         }
         result.setOutcome(r.records(), ColumnNames.STATUS_SUCCESS, "");
     }
+
+    // ==================== 管线结果处理 ====================
+
+    /**
+     * 将 UploadResult 写入 Result 对象 — 统一处理 SUCCESS/SKIPPED/ERROR 三种结果。
+     *
+     * <p>status=null 表示成功，非 null 表示 SKIPPED 或 ERROR。</p>
+     */
+    private static void applyPipelineResult(Result result, UploadSupport.UploadResult r) {
+        if (r.status() != null) {
+            result.setOutcome(0, r.status(), "Upload " + r.status());
+        } else {
+            result.setOutcome(r.records(), ColumnNames.STATUS_SUCCESS, "");
+        }
+    }
+
 }

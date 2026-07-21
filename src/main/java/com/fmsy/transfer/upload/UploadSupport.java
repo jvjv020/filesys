@@ -84,7 +84,7 @@ public class UploadSupport {
             String flagPath = resolveConfiguredFlagPath(config.getPreOperations(), fileInfo);
             log.warn("Pre-check failed (flag not found), flag file: {}, data file: {}",
                     flagPath != null ? flagPath : "unknown", filePath);
-            return new UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED);
+            return new UploadResult(0, ColumnNames.STATUS_SKIPPED);
         }
         return null;
     }
@@ -137,8 +137,6 @@ public class UploadSupport {
                 CloseableIterator<List<Map<String, Object>>> dataIter = new CloseableIterator<>(
                         converter.parse(is, effectiveMapping))) {
             return insertAndVerifyPerFileInTx(config, dataIter, effectiveMapping, auditCount);
-        } catch (RuntimeException e) {
-            throw e;
         } catch (Exception e) {
             throw new RuntimeException("Insert failed for " + filePath + ": " + e.getMessage(), e);
         }
@@ -193,22 +191,25 @@ public class UploadSupport {
      * 单文件上传管线 — preCheck → insertDataAndVerify → postProcess。
      *
      * <p>不包含 truncateTable（由调用方在适当时机执行）。
-     * mapping 和 detailContext 通过 {@link UploadOptions} 传入，二选一：
+     * mapping 和 detailContext 二选一：
      * <ul>
      *   <li>prebuiltMapping != null — 使用预构建的 FieldMapping（多文件并行场景）</li>
      *   <li>detailContext != null — 使用明细行上下文构建 FieldMapping（BATCH 场景）</li>
      *   <li>两者都 null — 自动构建 FieldMapping（SERIAL 单文件场景）</li>
      * </ul>
      *
-     * @param client   已借出的 FTP 客户端
-     * @param config   传输配置
-     * @param fileInfo 数据文件路径信息
-     * @param filePath 数据文件完整路径
-     * @param opts     上传选项（mapping/detailContext/auditCount）
+     * @param client          已借出的 FTP 客户端
+     * @param config          传输配置
+     * @param fileInfo        数据文件路径信息
+     * @param filePath        数据文件完整路径
+     * @param prebuiltMapping 预构建的 FieldMapping（可为 null）
+     * @param detailContext   明细行上下文（可为 null，用于构建 extraFields）
+     * @param auditCount      期望稽核数（可为 null，null=跳过稽核）
      * @return 上传结果
      */
     public UploadResult executeFilePipeline(FtpClient client, TransferConfig config,
-            ResolvedPath fileInfo, String filePath, UploadOptions opts) {
+            ResolvedPath fileInfo, String filePath,
+            FieldMapping prebuiltMapping, Map<String, Object> detailContext, Integer auditCount) {
 
         // Phase 1: preCheck
         UploadResult checkResult = preCheck(client, config, fileInfo, filePath);
@@ -216,16 +217,16 @@ public class UploadSupport {
 
         // Phase 2: insert + verify
         int count;
-        if (opts.prebuiltMapping() != null) {
-            count = insertDataAndVerify(client, config, opts.prebuiltMapping(), filePath, opts.auditCount());
+        if (prebuiltMapping != null) {
+            count = insertDataAndVerify(client, config, prebuiltMapping, filePath, auditCount);
         } else {
-            count = insertDataAndVerify(client, config, fileInfo, opts.detailContext(), filePath, opts.auditCount());
+            count = insertDataAndVerify(client, config, fileInfo, detailContext, filePath, auditCount);
         }
 
         // Phase 3: postProcess
         postProcess(client, config, fileInfo, count);
 
-        return new UploadResult(count, 1, 0, 0, null);
+        return new UploadResult(count, null);
     }
 
     /**
@@ -239,22 +240,26 @@ public class UploadSupport {
      *   <li>status=ERROR — 异常，文件已迁移到 error 目录</li>
      * </ul>
      *
-     * @param ftpName  FTP 连接名
-     * @param filePath 数据文件完整路径
-     * @param fileInfo 数据文件路径信息
-     * @param config   传输配置
-     * @param opts     上传选项（mapping/detailContext/auditCount）
+     * @param ftpName         FTP 连接名
+     * @param filePath        数据文件完整路径
+     * @param fileInfo        数据文件路径信息
+     * @param config          传输配置
+     * @param prebuiltMapping 预构建的 FieldMapping（可为 null）
+     * @param detailContext   明细行上下文（可为 null，用于构建 extraFields）
+     * @param auditCount      期望稽核数（可为 null，null=跳过稽核）
      * @return 上传结果
      */
     public UploadResult safeExecuteFilePipeline(String ftpName, String filePath,
-            ResolvedPath fileInfo, TransferConfig config, UploadOptions opts) {
+            ResolvedPath fileInfo, TransferConfig config,
+            FieldMapping prebuiltMapping, Map<String, Object> detailContext, Integer auditCount) {
         try {
             return transferSupport.executeWithClient(ftpName, client ->
-                    executeFilePipeline(client, config, fileInfo, filePath, opts));
+                    executeFilePipeline(client, config, fileInfo, filePath,
+                            prebuiltMapping, detailContext, auditCount));
         } catch (Exception e) {
             log.error("safeExecuteFilePipeline error for {}: {}", filePath, e.getMessage(), e);
             moveDataAndFlagToErrorDir(ftpName, filePath, config);
-            return new UploadResult(0, 0, 0, 1, ColumnNames.STATUS_ERROR);
+            return new UploadResult(0, ColumnNames.STATUS_ERROR);
         }
     }
 
@@ -272,7 +277,7 @@ public class UploadSupport {
      * @param insertedCount 本次成功插入的记录数
      * @return true=审计通过
      */
-    public boolean postAudit(TransferConfig config, int fileLineCount, int insertedCount) {
+    boolean postAudit(TransferConfig config, int fileLineCount, int insertedCount) {
         boolean passed = fileLineCount == insertedCount;
         log.info("Post-audit upload: fileRecords={}, inserted={}, passed={}",
                 fileLineCount, insertedCount, passed);
@@ -347,7 +352,7 @@ public class UploadSupport {
      * @return 成功插入的记录数
      * @throws RuntimeException 审计失败时抛出，触发事务回滚
      */
-    public int insertAndVerifyPerFileInTx(TransferConfig config,
+    int insertAndVerifyPerFileInTx(TransferConfig config,
             CloseableIterator<List<Map<String, Object>>> dataIter,
             FieldMapping mapping,
             Integer auditCount) {
@@ -434,14 +439,6 @@ public class UploadSupport {
     // ==================== 标志文件路径解析工具 ====================
 
     /**
-     * 从前置操作字符串中提取第一个 FLAG/READY 路径模式。
-     * 委托给 {@link FlagFileService#extractFlagPathPattern}。
-     */
-    public static String extractFlagPathPattern(String preOps) {
-        return FlagFileService.extractFlagPathPattern(preOps);
-    }
-
-    /**
      * 从传输配置的前置操作中提取标志文件的完整路径。
      *
      * <p>
@@ -471,19 +468,8 @@ public class UploadSupport {
         return FlagFileService.normalizePath(resolved);
     }
 
-    /**
-     * 规范化路径中的 ".." 段 — 委托给 {@link FlagFileService#normalizePath}。
-     *
-     * @deprecated 直接使用 {@link FlagFileService#normalizePath}
-     */
-    @Deprecated
-    public static String normalizePathSlashes(String path) {
-        return FlagFileService.normalizePath(path);
-    }
 
-    // ==================== 管线选项 / 结果 ====================
-
-    /**
+/**
      * 上传管线选项 — 封装 {@link #executeFilePipeline} 和 {@link #safeExecuteFilePipeline} 的可选参数。
      *
      * <p>三个字段可任意组合：
@@ -505,19 +491,17 @@ public class UploadSupport {
         }
     }
 
+    // ==================== 管线结果 ====================
+
     /**
      * 单文件上传结果。
      *
-     * @param records      成功插入的记录数（跳过或失败时为0）
-     * @param successCount 成功文件数
-     * @param skippedCount 跳过文件数
-     * @param failedCount  失败文件数
-     * @param status       null=成功，SKIPPED=跳过，ERROR=失败
+     * @param records 成功插入的记录数（跳过或失败时为0）
+     * @param status  null=成功，SKIPPED=跳过，ERROR=失败
      */
-    public record UploadResult(int records, int successCount, int skippedCount, int failedCount,
-            String status) {
+    public record UploadResult(int records, String status) {
         public static UploadResult allSkipped() {
-            return new UploadResult(0, 0, 1, 0, ColumnNames.STATUS_SKIPPED);
+            return new UploadResult(0, ColumnNames.STATUS_SKIPPED);
         }
     }
 

@@ -36,9 +36,15 @@
 | `ParallelFileGenerator` | 按分区并行读取 DB → 临时文件 → 顺序拼接 |
 
 ### 上传子包（`transfer/upload/`）
-| 类 | 角色 |
-|---|------|
-| `UploadSupport` | 上传方向特有协议 + 流式插入事务 |
+
+上传包按职责分为 4 个类：
+
+| 类 | 职责 | 角色 |
+|----|------|------|
+| `SingleUploadHandler` | 处理 | UPLOAD_SINGLE（SERIAL）+ UPLOAD_MULTI（BATCH 明细表单文件） |
+| `MultiUploadHandler` | 处理 | UPLOAD_MULTI（SERIAL 目录通配符多文件并行） |
+| `UploadSupport` | 协议 | 上传管线编排、流式插入事务、前后审计、异常文件迁移 |
+| `UploadPrescanner` | 工具 | 按 flag/glob 模式从 FTP 列表中筛选有效数据文件（无状态静态方法） |
 
 ### 工具类
 | 类 | 角色 |

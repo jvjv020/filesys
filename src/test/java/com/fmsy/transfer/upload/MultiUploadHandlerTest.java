@@ -59,9 +59,7 @@ class MultiUploadHandlerTest {
 
     /** 构造 safeExecuteFilePipeline 的 mock 返回值 */
     private UploadSupport.UploadResult mockPipelineResult(int records, String status) {
-        int failed = ColumnNames.STATUS_ERROR.equals(status) ? 1 : 0;
-        int skipped = ColumnNames.STATUS_SKIPPED.equals(status) ? 1 : 0;
-        return new UploadSupport.UploadResult(records, failed > 0 ? 0 : 1, skipped, failed, status);
+        return new UploadSupport.UploadResult(records, status);
     }
 
     @BeforeEach
@@ -103,7 +101,7 @@ class MultiUploadHandlerTest {
                     }).when(transferSupport).executeWithClient(eq("ftp1"), any());
             when(fieldMappingBuilder.buildForUpload(config, null)).thenReturn(fieldMapping);
             // 默认管线返回成功 100 条
-            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any(), any(), any()))
                     .thenReturn(mockPipelineResult(100, null));
         }
 
@@ -127,7 +125,7 @@ class MultiUploadHandlerTest {
             handler.handle(command, config, result);
 
             verify(uploadSupport).truncateTable(config);
-            verify(uploadSupport, atLeastOnce()).safeExecuteFilePipeline(any(), any(), any(), any(), any());
+            verify(uploadSupport, atLeastOnce()).safeExecuteFilePipeline(any(), any(), any(), any(), any(), any(), any());
         }
 
         @Test
@@ -148,7 +146,7 @@ class MultiUploadHandlerTest {
         void shouldCountInsertFailAsError() throws Exception {
             when(ftpClient.listFiles(anyString())).thenReturn(new String[]{"/data/files/file1.csv"});
             // 管线返回 ERROR → insertSingleFile 返回 TASK_FAIL
-            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any(), any(), any()))
                     .thenReturn(mockPipelineResult(0, ColumnNames.STATUS_ERROR));
 
             handler.handle(command, config, result);
@@ -213,7 +211,7 @@ class MultiUploadHandlerTest {
         @DisplayName("完整路径处理")
         void shouldHandleFullPath() {
             ResolvedPath info = ResolvedPath.of("/data/file.csv");
-            String result = MultiUploadHandler.resolveFlagName("{name}.flag", info);
+            String result = UploadPrescanner.resolveFlagName("{name}.flag", info);
             assertEquals("/data/file.csv.flag", result);
         }
 
@@ -221,15 +219,15 @@ class MultiUploadHandlerTest {
         @DisplayName("处理相对路径")
         void shouldHandleRelativePath() {
             ResolvedPath info = ResolvedPath.of("file.csv");
-            String result = MultiUploadHandler.resolveFlagName("{stem}.OK", info);
-            assertEquals("file.OK", result);
+            String result = UploadPrescanner.resolveFlagName("{stem}.OK", info);
+            assertEquals("/file.OK", result);
         }
 
         @Test
         @DisplayName("null 输入返回 null")
         void shouldReturnNullForNull() {
-            assertNull(MultiUploadHandler.resolveFlagName(null, ResolvedPath.of("f.csv")));
-            assertNull(MultiUploadHandler.resolveFlagName("{stem}.OK", null));
+            assertNull(UploadPrescanner.resolveFlagName(null, ResolvedPath.of("f.csv")));
+            assertNull(UploadPrescanner.resolveFlagName("{stem}.OK", null));
         }
     }
 }

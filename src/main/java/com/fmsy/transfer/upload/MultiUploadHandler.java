@@ -1,7 +1,6 @@
 package com.fmsy.transfer.upload;
 
 import com.fmsy.fileops.FlagFileService;
-import com.fmsy.ftp.FtpClient;
 import com.fmsy.model.Command;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
@@ -17,11 +16,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -43,7 +38,7 @@ import java.util.regex.Pattern;
  *
  * <p>
  * 阶段顺序：<br>
- * 预扫描（单次 FTP 连接内完成列表+标志检查+孤立标志文件迁 error）→ 清表 → 并行落库+前后审计 → 汇总后操作
+ * 预扫描（单次 FTP 列表 → {@link UploadPrescanner} 筛选）→ 清表 → 并行落库 → 汇总
  *
  * <p>
  * 前稽核已合并到 insertDataAndVerify 的落库后阶段，与后审计使用
@@ -55,7 +50,8 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class MultiUploadHandler implements TransferHandler {
 
-    static final int TASK_FAIL = -2;
+    /** insertSingleFile 失败标记值 */
+    private static final int TASK_FAIL = -2;
 
     private final UploadSupport support;
     private final TransferSupport transferSupport;
@@ -161,203 +157,22 @@ public class MultiUploadHandler implements TransferHandler {
             TransferConfig config, FieldMapping mapping, Integer auditCount) {
         var r = support.safeExecuteFilePipeline(
                 ftpName, filePath, fileInfo, config,
-                new UploadSupport.UploadOptions(mapping, null, auditCount));
+                mapping, null, auditCount);
         if (ColumnNames.STATUS_ERROR.equals(r.status())) return TASK_FAIL;
         return r.records(); // 0 for SKIPPED, >0 for SUCCESS
     }
 
-    // ==================== 预扫描工具 ====================
+    // ==================== 预扫描（委托给 UploadPrescanner） ====================
 
     /**
-     * 将标志文件名模式转换为正则表达式，用于匹配标志文件。
+     * 单次 FTP 连接内完成：文件列表 + 预扫描筛选。
      *
      * <p>
-     * 已知变量（{stem}、{name}、{ext}、{dir}、{dn}、{up}）替换为 {@code [^/]+?}，
-     * 字面量部分做 {@link Pattern#quote} 转义，避免正则元字符冲突。
-     * </p>
-     *
-     * <p>
-     * 示例：
-     * <ul>
-     *   <li>{@code {stem}.ok} → {@code ^[^/]+?\.ok$}</li>
-     *   <li>{@code {name}.ok} → {@code ^[^/]+?\.ok$}</li>
-     *   <li>{@code filename.ok} → {@code ^filename\.ok$}</li>
-     *   <li>{@code flag_{stem}.ok} → {@code ^flag_[^/]+?\.ok$}</li>
-     * </ul>
-     * </p>
-     */
-    static Pattern toFlagRegex(String flagPattern) {
-        if (flagPattern == null) return null;
-        // 按变量边界分割，保留变量作为独立元素
-        String[] parts = flagPattern.split("(?=\\{)|(?<=\\})", -1);
-        StringBuilder sb = new StringBuilder("^");
-        for (String part : parts) {
-            if (isBracketVariable(part)) {
-                sb.append("[^/]+?");
-            } else {
-                sb.append(Pattern.quote(part));
-            }
-        }
-        sb.append("$");
-        return Pattern.compile(sb.toString());
-    }
-
-    private static final Set<String> KNOWN_VARS = Set.of("stem", "name", "ext", "dir", "dn", "up");
-
-    private static boolean isBracketVariable(String s) {
-        return s != null && s.length() > 2
-                && s.charAt(0) == '{' && s.charAt(s.length() - 1) == '}'
-                && KNOWN_VARS.contains(s.substring(1, s.length() - 1));
-    }
-
-    /**
-     * 预扫描：用正则从文件列表中分离出标志文件，再交叉筛选有效数据文件。
-     *
-     * <p>
-     * 对比旧方案（用 {@link #resolveFlagName} 对文件自身做自识别），
-     * 正则匹配能兼容所有变量命名模式（{stem}、{name} 等），
-     * 不会出现 {@code {name}.ok} 模式下标志文件自识别失败的问题。
-     * </p>
-     *
-     * <p>
-     * 流程：
-     * <ol>
-     *   <li>用 {@link #toFlagRegex} 将标志模式转为正则，扫描文件列表分离出 标志文件集合 和 候选数据文件</li>
-     *   <li>对每个候选数据文件，计算期望标志文件名，检查是否在标志文件集合中</li>
-     *   <li>有 → 加入有效数据文件；无 → 日志告警并跳过</li>
-     * </ol>
-     * </p>
-     *
-     * @param allFiles    FTP 目录列表全部文件
-     * @param flagPattern 标志文件名模式（如 {@code {stem}.ok}），null 表示无 flag 模式
-     * @return 有效数据文件（有对应标志文件的数据文件）列表
-     */
-    List<String> prescanDataFiles(String[] allFiles, String flagPattern) {
-        return prescanDataFiles(allFiles, flagPattern, null, null);
-    }
-
-    /**
-     * 预扫描：用正则从文件列表中分离出标志文件，再交叉筛选有效数据文件。
-     *
-     * <p>有 flag 模式时，完成筛选后一并处理孤立标志文件迁移。
-     * 无 flag 模式时，使用 {@code listRegex} 过滤文件列表，只保留匹配数据文件命名模式的文件。
-     * </p>
-     *
-     * @param allFiles    FTP 目录列表全部文件
-     * @param flagPattern 标志文件名模式，null 表示无 flag 模式
-     * @param listRegex   数据文件命名正则，用于过滤额外文件
-     * @param client      FTP 客户端（非 null 时执行孤立标志文件迁移）
-     * @return 有效数据文件列表
-     */
-    List<String> prescanDataFiles(String[] allFiles, String flagPattern, Pattern listRegex, FtpClient client) {
-        if (allFiles == null || allFiles.length == 0)
-            return List.of();
-
-        // 一次遍历完成数据文件和标志文件的分类
-        Pattern flagRegex = flagPattern != null ? toFlagRegex(flagPattern) : null;
-        List<String> dataFiles = new ArrayList<>();
-        Set<String> flagNames = new HashSet<>();
-        Map<String, String> flagFilePaths = new HashMap<>();
-
-        for (String f : allFiles) {
-            String name = ResolvedPath.of(f).name();
-            boolean isFlag = flagRegex != null && flagRegex.matcher(name).matches();
-            boolean isData = listRegex == null || listRegex.matcher(name).matches();
-
-            if (isFlag) {
-                flagNames.add(name);
-                flagFilePaths.put(name, f);
-            }
-            if (isData && !isFlag) {
-                dataFiles.add(f);
-            }
-        }
-
-        if (flagPattern == null) {
-            return dataFiles; // 无 flag 模式，数据文件即为有效
-        }
-
-        // Step 3: 遍历数据文件列表，有对应标志的列为有效并从标志集合中删除
-        List<String> validDataFiles = new ArrayList<>();
-        for (String f : dataFiles) {
-            ResolvedPath fileInfo = ResolvedPath.of(f);
-            String expectedFlagName = resolveFlagName(flagPattern, fileInfo);
-            ResolvedPath expectedPath = ResolvedPath.of(expectedFlagName);
-            String expectedFlagFileName = expectedPath != null ? expectedPath.name() : null;
-
-            if (flagNames.remove(expectedFlagFileName)) {
-                validDataFiles.add(f);
-            } else {
-                log.warn("Data file {} has no corresponding flag file (expected: {}), skipping",
-                        f, expectedFlagName);
-            }
-        }
-
-        // Step 4: 标志文件列表中还存留的即为孤立标志（无对应数据文件），迁移到 error
-        if (client != null) {
-            int orphanedCount = 0;
-            for (String name : flagNames) {
-                String fullPath = flagFilePaths.get(name);
-                log.warn("Orphaned flag file, moving to error: {}", fullPath);
-                try {
-                    client.moveToErrorDir(fullPath);
-                    orphanedCount++;
-                } catch (Exception e) {
-                    log.error("Failed to move orphaned flag to error: {}", fullPath, e);
-                }
-            }
-            if (orphanedCount > 0) {
-                log.info("Moved {} orphaned flag(s) to error dir", orphanedCount);
-            }
-        }
-        return validDataFiles;
-    }
-
-    static String resolveFlagName(String flagPattern, ResolvedPath fileInfo) {
-        if (flagPattern == null || fileInfo == null)
-            return null;
-        String resolved = TransferSupport.expandPathVariables(flagPattern, fileInfo);
-        return fileInfo.resolveRelative(resolved);
-    }
-
-    /**
-     * 将 glob 通配符模式转为正则，用于无 flag 模式时对数据文件做二次过滤。
-     * <p>
-     * 示例：{@code BR*.csv} → {@code ^BR[^/]*\.csv$}
-     * </p>
-     */
-    static Pattern globToRegex(String glob) {
-        if (glob == null) return null;
-        // 提取文件名部分（glob 通常是完整路径，如 /data/BR*.csv）
-        int lastSlash = glob.lastIndexOf('/');
-        String pattern = lastSlash >= 0 ? glob.substring(lastSlash + 1) : glob;
-        // 若去掉目录后无通配符，说明 listPattern 不含 {FILE_NAME} 占位符，无需过滤
-        if (pattern.isEmpty()) return null;
-
-        StringBuilder sb = new StringBuilder("^");
-        for (int i = 0; i < pattern.length(); i++) {
-            char c = pattern.charAt(i);
-            if (c == '*') {
-                sb.append("[^/]*");
-            } else if (c == '?') {
-                sb.append("[^/]");
-            } else {
-                sb.append(Pattern.quote(String.valueOf(c)));
-            }
-        }
-        sb.append("$");
-        return Pattern.compile(sb.toString());
-    }
-
-    /**
-     * 单次 FTP 连接内完成：文件列表 + 头部检查 + 异常文件处理。
-     *
-     * <p>
-     * 委托给 {@link #prescanDataFiles} 完成有效数据文件筛选和孤立标志文件迁移。
+     * 委托给 {@link UploadPrescanner#prescanDataFiles} 完成有效数据文件筛选和孤立标志文件迁移。
      * </p>
      *
      * @param ftpName     FTP 连接名
-     * @param listPattern 文件列表通配符模式
+     * @param listPattern 文件列表通配符模式（{FILE_NAME} 已替换为 *）
      * @param config      传输配置
      * @return 有效数据文件完整路径列表；null 表示列表失败
      */
@@ -369,14 +184,13 @@ public class MultiUploadHandler implements TransferHandler {
             if (allFiles.length == 0) return List.of();
 
             String flagPattern = FlagFileService.extractFlagPathPattern(config.getPreOperations());
-
-            // 统一走 prescanDataFiles 筛选有效数据文件 + 孤立标志文件迁移
-            Pattern listRegex = globToRegex(listPattern);
-            List<String> validFiles = prescanDataFiles(allFiles, flagPattern, listRegex, client);
+            Pattern listRegex = UploadPrescanner.globToRegex(listPattern);
+            List<String> validFiles = UploadPrescanner.prescanDataFiles(
+                    allFiles, flagPattern, listRegex, client);
 
             log.info("Prescan result: {} valid files (pattern: {})", validFiles.size(), listPattern);
             return validFiles;
         });
     }
 
-    }
+}
