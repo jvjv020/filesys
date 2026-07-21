@@ -486,8 +486,7 @@ public class UploadSupport {
     /**
      * 上传管线选项 — 封装 {@link #executeFilePipeline} 和 {@link #safeExecuteFilePipeline} 的可选参数。
      *
-     * <p>与下载侧的 {@code PipelineOptions} 对应，控制 mapping、detailContext 和 auditCount。
-     * 三个字段可任意组合：
+     * <p>三个字段可任意组合：
      * <ul>
      *   <li>prebuiltMapping != null — 使用预构建的 FieldMapping（多文件并行场景）</li>
      *   <li>detailContext != null — 使用明细行上下文构建 FieldMapping（BATCH 场景）</li>

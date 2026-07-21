@@ -1,6 +1,7 @@
 package com.fmsy.transfer.download;
 
 import com.fmsy.enums.CommandType;
+import com.fmsy.enums.EmptyDataHandling;
 import com.fmsy.fileops.FlagFileService;
 import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
@@ -32,7 +33,14 @@ import static com.fmsy.transfer.TransferSupport.determineMainStatus;
 /**
  * DOWNLOAD_SINGLE_NODE 场景:按拆分字段分桶,每个桶生成一个文件,并行下载到同一节点 FTP。
  *
- * <p>桶的并行处理通过线程池提交,每桶走 {@link DownloadSupport#executePipeline} 管线。
+ * <p>桶的并行处理通过线程池提交,每桶显式编排:
+ * <ol>
+ *   <li>路径解析</li>
+ *   <li>前稽核/计数 (DB-only)</li>
+ *   <li>空数据处理</li>
+ *   <li>FTP 会话:生成文件 → 后操作(SUB)</li>
+ *   <li>更新明细表状态</li>
+ * </ol>
  * Handler 负责顶层 preCheck、分桶、总标志文件和聚合后稽核。
  */
 @Slf4j
@@ -134,7 +142,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
     }
 
     /**
-     * 并行处理所有桶:每桶走 DownloadSupport.executePipeline 管线,结果聚合到 BucketBatchResult。
+     * 并行处理所有桶:每桶显式编排各阶段,结果聚合到 BucketBatchResult。
      */
     private BucketBatchResult processBucketsInParallel(List<Detail> buckets, TransferConfig config,
                                                         ResolvedPath baseFileInfo, String splitFields,
@@ -158,7 +166,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         return result;
     }
 
-    /** 处理单个桶: 路径解析 → 构建管线选项 → executePipeline → 聚合结果 */
+    /** 处理单个桶: 路径解析 → 前稽核 → 空数据处理 → FTP 生成文件 → 后操作 → 明细状态更新 */
     private void processOneBucket(Detail bucket, TransferConfig config,
                                   ResolvedPath baseFileInfo, String splitFields,
                                   FieldMapping sharedMapping, CommandType commandType,
@@ -169,40 +177,70 @@ public class SingleNodeDownloadHandler implements TransferHandler {
                     null, splitFields, bucket.getFieldValue());
             ResolvedPath targetFileInfo = transferSupport.resolveFilePath(
                     baseFileInfo.fullPath(), context);
+            String filePath = targetFileInfo != null ? targetFileInfo.fullPath() : null;
 
-            // 构建管线选项
-            DownloadSupport.PipelineOptions pipelineOpts = DownloadSupport.PipelineOptions.builder()
-                    .wholeTable(false)
-                    .fieldValue(bucket.getFieldValue())
-                    .expectedAuditCount(null)
-                    .enablePreCheck(false)       // 顶层已做
-                    .enableOverwriteCheck(false)
-                    .enablePostAudit(false)       // 聚合层做
-                    .postOpsFilter("SUB")
-                    .detail(bucket)
-                    .nodeId(nodeId)
-                    .build();
-
-            // 复用预构建的字段映射
-            pipelineOpts.setFieldMapping(sharedMapping);
-
-            // BATCH 模式:用明细表的 auditCount
+            // BATCH 模式:使用明细表的 auditCount
+            Integer auditCount = null;
             if (commandType == CommandType.BATCH) {
                 Integer detailAudit = bucket.getAuditCount();
                 if (detailAudit != null && detailAudit >= 0) {
-                    pipelineOpts.setExpectedAuditCount(detailAudit);
+                    auditCount = detailAudit;
                 }
             }
 
-            // 执行管线
-            DownloadSupport.PipelineResult pr = downloadSupport.executePipeline(
-                    ftpName, config, targetFileInfo, pipelineOpts);
+            // ===== Phase 1: 前稽核/计数 (DB-only) =====
+            int recordCount;
+            if (auditCount != null) {
+                int auditResult = downloadSupport.preAuditByBucket(config, auditCount, bucket.getFieldValue());
+                if (auditResult < 0) {
+                    log.warn("Pre-audit failed for bucket {}, fieldValue={}",
+                            bucket.getId(), bucket.getFieldValue());
+                    downloadSupport.updateDetailStatus(bucket.getId(), ColumnNames.STATUS_SKIPPED, nodeId);
+                    result.accumulateSkipped();
+                    return;
+                }
+                recordCount = auditResult;
+            } else {
+                recordCount = downloadSupport.countByBucket(config, splitFields, bucket.getFieldValue());
+            }
+
+            // ===== Phase 2: 空数据处理 =====
+            if (recordCount == 0
+                    && !transferSupport.handleEmptyData(0, config.getEmptyDataHandling())) {
+                String status = config.getEmptyDataHandling() == EmptyDataHandling.ERROR
+                        ? ColumnNames.STATUS_ERROR : ColumnNames.STATUS_SKIPPED;
+                log.warn("Empty data handling ({}) for bucket {}",
+                        config.getEmptyDataHandling(), bucket.getId());
+                downloadSupport.updateDetailStatus(bucket.getId(), status, nodeId);
+                if (ColumnNames.STATUS_ERROR.equals(status)) {
+                    result.accumulateFailure();
+                } else {
+                    result.accumulateSkipped();
+                }
+                return;
+            }
+
+            // ===== Phase 3-4: FTP 传输 =====
+            int count = transferSupport.executeWithClient(ftpName, client -> {
+                // 生成文件(分桶模式)
+                int c = downloadSupport.generateFile(client, config, false,
+                        bucket.getFieldValue(), sharedMapping, recordCount, filePath);
+
+                // 后操作(仅 SUB)
+                downloadSupport.postProcess(client, config, targetFileInfo, c, "SUB");
+
+                return c;
+            });
+
+            // ===== Phase 5: 更新明细表状态 =====
+            downloadSupport.updateDetailStatus(bucket.getId(), ColumnNames.STATUS_SUCCESS, nodeId);
 
             // 聚合结果
-            result.accumulate(pr, targetFileInfo != null ? targetFileInfo.fullPath() : null);
+            result.accumulate(count, filePath);
 
         } catch (Exception e) {
-            log.error("Bucket {} processing failed for table {}: {}", bucket.getId(), config.getTableName(), e.getMessage(), e);
+            log.error("Bucket {} processing failed for table {}: {}",
+                    bucket.getId(), config.getTableName(), e.getMessage(), e);
             result.accumulateFailure();
         }
     }
@@ -220,21 +258,17 @@ public class SingleNodeDownloadHandler implements TransferHandler {
         private final AtomicBoolean allSuccess = new AtomicBoolean(true);
         private final ConcurrentLinkedQueue<String> generatedFiles = new ConcurrentLinkedQueue<>();
 
-        void accumulate(DownloadSupport.PipelineResult pr, String filePath) {
-            if (pr.isSuccess()) {
-                totalRecordCount.addAndGet(pr.getRecordCount());
-                successCount.incrementAndGet();
-                if (filePath != null) {
-                    generatedFiles.add(filePath);
-                }
-            } else {
-                allSuccess.set(false);
-                if (ColumnNames.STATUS_SKIPPED.equals(pr.getStatus())) {
-                    skippedCount.incrementAndGet();
-                } else {
-                    failedCount.incrementAndGet();
-                }
+        void accumulate(int recordCount, String filePath) {
+            totalRecordCount.addAndGet(recordCount);
+            successCount.incrementAndGet();
+            if (filePath != null) {
+                generatedFiles.add(filePath);
             }
+        }
+
+        void accumulateSkipped() {
+            allSuccess.set(false);
+            skippedCount.incrementAndGet();
         }
 
         void accumulateFailure() {
