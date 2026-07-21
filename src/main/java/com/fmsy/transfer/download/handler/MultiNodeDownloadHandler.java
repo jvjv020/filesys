@@ -1,13 +1,14 @@
-package com.fmsy.transfer.download;
+package com.fmsy.transfer.download.handler;
 
 import com.fmsy.enums.CommandType;
 import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
-import com.fmsy.transfer.download.BucketDistributor;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
+import com.fmsy.transfer.download.multi.BucketDistributor;
+import com.fmsy.transfer.download.multi.MultiNodeFlowService;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
 import lombok.RequiredArgsConstructor;
@@ -16,7 +17,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * DOWNLOAD_MULTI_NODE 场景：创建 S 型子命令供各节点竞争处理，然后由异步的
- * SplitFlowService（分桶）+ MergeFlowService（合并）+ ChildBucketProcessor（子节点处理）完成全过程。
+ * MultiNodeFlowService（分桶 + 合并）+ ChildBucketProcessor（子节点处理）完成全过程。
  *
  * <p>
  * 阶段顺序：<br>
@@ -24,12 +25,12 @@ import org.springframework.stereotype.Component;
  *
  * <p>
  * <b>BATCH 模式</b>：复用明细表已存在的桶，更新每个桶的 auditCount，再创建 S 子命令。
- * 桶已预先存在，prepareBatchChildren 完成后标记 splitDone 使 MergeFlowService 能正常退出。<br>
- * <b>SERIAL 模式</b>：调用 {@link SplitFlowService#startSplitAsync} 按 PK 范围异步切分桶
+ * 桶已预先存在，prepareBatchChildren 完成后标记 splitDone 使合并流程能正常退出。<br>
+ * <b>SERIAL 模式</b>：调用 {@link MultiNodeFlowService#startSplitAsync} 按 PK 范围异步切分桶
  * （写入 specName），切分完成后在回调中创建 S 子命令并启动合并。
  *
  * <p>
- * <b>两种模式均启动 {@link MergeFlowService#startMergeAsync}</b> 异步合并临时文件到目标文件。<br>
+ * <b>两种模式均启动 {@link MultiNodeFlowService#startMergeAsync}</b> 异步合并临时文件到目标文件。<br>
  * <b>成功</b>：{@code result.markChildrenCreated()} 主命令保持 PROCESSING，
  * 合并完成回调（onSuccess）置主命令为 Y。<br>
  * <b>失败</b>：{@code result.markChildrenFailed(reason)} 主命令置 ERROR。
@@ -39,8 +40,8 @@ import org.springframework.stereotype.Component;
  * {@link #startMerge} 方法中，使异步流程的状态转移在主体代码中可见，便于排查。
  *
  * <p>
- * 子命令的并发执行由 {@link ChildBucketProcessor} 接管（本 Handler 不参与）。
- * preCheck 用短生命周期 FTP 连接，完成后立即归还；
+ * 子命令的并发执行由 {@link com.fmsy.transfer.download.multi.ChildBucketProcessor} 接管
+ * （本 Handler 不参与）。preCheck 用短生命周期 FTP 连接，完成后立即归还；
  * createChildren 为纯 DB 操作时不持有 FTP 连接。
  *
  * <p>
@@ -54,8 +55,7 @@ public class MultiNodeDownloadHandler implements TransferHandler {
 
     private final BucketDistributor bucketDistributor;
     private final TransferSupport transferSupport;
-    private final SplitFlowService splitFlowService;
-    private final MergeFlowService mergeFlowService;
+    private final MultiNodeFlowService multiNodeFlowService;
     private final CommandRepository commandRepository;
 
     @Override
@@ -87,7 +87,7 @@ public class MultiNodeDownloadHandler implements TransferHandler {
         if (commandType == CommandType.BATCH) {
             /* ---------- BATCH: 复用明细表已有桶, 创建 S 子命令 ---------- */
             int childCount = bucketDistributor.prepareBatchChildren(command, config, baseFilePath, splitFields);
-            /* ---------- BATCH: 标记 splitDone 使 MergeFlowService 能正常退出 ---------- */
+            /* ---------- BATCH: 标记 splitDone 使合并流程能正常退出 ---------- */
             commandRepository.markSplitDone(command.getId());
 
             if (childCount > 0) {
@@ -102,7 +102,7 @@ public class MultiNodeDownloadHandler implements TransferHandler {
             // 先标记结果状态为 P, 让 orchestrator 写入 P 状态;
             // 切分完成后在回调中创建子命令 + 启动合并
             result.markChildrenCreated();
-            splitFlowService.startSplitAsync(cmdId, config,
+            multiNodeFlowService.startSplitAsync(cmdId, config,
                     // onComplete: 切分完成 → 创建子命令 + 启动合并
                     () -> {
                         int cnt = bucketDistributor.createChildCommands(cmdId,
@@ -125,7 +125,7 @@ public class MultiNodeDownloadHandler implements TransferHandler {
      * 便于排查异步流程的终态走向。
      */
     private void startMerge(Long cmdId, TransferConfig config, ResolvedPath baseFileInfo) {
-        mergeFlowService.startMergeAsync(cmdId, config, baseFileInfo,
+        multiNodeFlowService.startMergeAsync(cmdId, config, baseFileInfo,
                 // onSuccess: 合并成功,主命令终态置 Y
                 // 条件更新(P→Y):避免覆盖其他路径(如子命令失败)已写入的 E 状态
                 () -> {

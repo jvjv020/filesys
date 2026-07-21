@@ -4,6 +4,7 @@ import com.fmsy.enums.CommandType;
 import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
+import com.fmsy.transfer.download.handler.SingleDownloadHandler;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
@@ -21,8 +22,6 @@ import org.mockito.quality.Strictness;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
-
-import org.mockito.ArgumentCaptor;
 
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -68,21 +67,24 @@ class SingleDownloadHandlerTest {
     @DisplayName("should delegate to pipeline and set outcome")
     void shouldDelegateToPipeline() throws Exception {
         when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-        when(downloadSupport.executePipeline(anyString(), eq(config), any(ResolvedPath.class), any()))
+        when(downloadSupport.executeWholeTablePipeline(anyString(), eq(config), any(ResolvedPath.class),
+                any(), any(), anyBoolean(), anyBoolean(), any(), any()))
                 .thenReturn(new DownloadSupport.PipelineResult(100, true, ColumnNames.STATUS_SUCCESS, "/data/out.csv"));
 
         handler.handle(command, config, result);
 
         assertEquals(100, result.getRecordCount());
         assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
-        verify(downloadSupport).executePipeline(eq("ftp1"), eq(config), eq(fileInfo), any());
+        verify(downloadSupport).executeWholeTablePipeline(eq("ftp1"), eq(config), eq(fileInfo),
+                eq(100), isNull(), eq(true), eq(true), isNull(), isNull());
     }
 
     @Test
     @DisplayName("should map pipeline SKIPPED to result")
     void shouldMapSkipped() throws Exception {
         when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-        when(downloadSupport.executePipeline(anyString(), any(), any(), any()))
+        when(downloadSupport.executeWholeTablePipeline(anyString(), any(), any(),
+                any(), any(), anyBoolean(), anyBoolean(), any(), any()))
                 .thenReturn(new DownloadSupport.PipelineResult(0, false, ColumnNames.STATUS_SKIPPED, "/data/out.csv"));
 
         handler.handle(command, config, result);
@@ -94,7 +96,8 @@ class SingleDownloadHandlerTest {
     @DisplayName("should map pipeline ERROR to result")
     void shouldMapError() throws Exception {
         when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-        when(downloadSupport.executePipeline(anyString(), any(), any(), any()))
+        when(downloadSupport.executeWholeTablePipeline(anyString(), any(), any(),
+                any(), any(), anyBoolean(), anyBoolean(), any(), any()))
                 .thenReturn(new DownloadSupport.PipelineResult(0, false, ColumnNames.STATUS_ERROR, "/data/out.csv"));
 
         handler.handle(command, config, result);
@@ -107,15 +110,15 @@ class SingleDownloadHandlerTest {
     void shouldDisablePostAuditWhenAuditCountNull() throws Exception {
         command.setAuditCount(null);
         when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-        when(downloadSupport.executePipeline(anyString(), any(), any(), any()))
+        when(downloadSupport.executeWholeTablePipeline(anyString(), any(), any(),
+                any(), any(), anyBoolean(), anyBoolean(), any(), any()))
                 .thenReturn(new DownloadSupport.PipelineResult(100, true, ColumnNames.STATUS_SUCCESS, "/data/out.csv"));
 
         handler.handle(command, config, result);
 
         assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
-        // Verify pipeline options had enablePostAudit=false
-        ArgumentCaptor<DownloadSupport.PipelineOptions> captor = ArgumentCaptor.captor();
-        verify(downloadSupport).executePipeline(anyString(), any(), any(), captor.capture());
-        assertFalse(captor.getValue().enablePostAudit);
+        // 验证 enablePostAudit=false（auditCount=null → hasAudit=false → enablePostAudit=false）
+        verify(downloadSupport).executeWholeTablePipeline(eq("ftp1"), eq(config), eq(fileInfo),
+                isNull(), isNull(), eq(true), eq(false), isNull(), isNull());
     }
 }

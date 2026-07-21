@@ -1,10 +1,11 @@
-package com.fmsy.transfer.download;
+package com.fmsy.transfer.download.handler;
 
 import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
+import com.fmsy.transfer.download.DownloadSupport;
 import com.fmsy.util.ColumnNames;
 import com.fmsy.util.ResolvedPath;
 import lombok.RequiredArgsConstructor;

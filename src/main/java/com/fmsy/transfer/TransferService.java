@@ -6,7 +6,7 @@ import com.fmsy.lifecycle.ConfigLoaderService;
 import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
-import com.fmsy.transfer.download.ChildBucketProcessor;
+import com.fmsy.transfer.download.multi.ChildBucketProcessor;
 import com.fmsy.repository.CommandRepository;
 import com.fmsy.transfer.TransferOrchestrator;
 import com.fmsy.util.LogUtils;

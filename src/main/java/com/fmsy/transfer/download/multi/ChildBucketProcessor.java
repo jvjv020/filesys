@@ -1,4 +1,4 @@
-package com.fmsy.transfer.download;
+package com.fmsy.transfer.download.multi;
 
 import com.fmsy.config.AppConfig;
 import com.fmsy.converter.ConverterFactory;
@@ -25,6 +25,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.io.OutputStream;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -33,7 +34,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntFunction;
-import java.io.OutputStream;
 
 /**
  * 子节点桶处理器 — 处理 DOWNLOAD_MULTI_NODE 场景下 S 型子命令的桶执行。
@@ -208,7 +208,7 @@ public class ChildBucketProcessor {
 
         String specName = bucket.getSpecName();
         if (specName != null && !specName.isEmpty()) {
-            // Path A: PK 范围查询(由 SplitFlowService 创建,含 specName)
+            // Path A: PK 范围查询(由 MultiNodeFlowService 创建,含 specName)
             processByPkRange(bucket, config, ftpName, tempFilePath, pkColumns, converter, mapping,
                     specName);
         } else {
@@ -244,8 +244,8 @@ public class ChildBucketProcessor {
         // specName 为 ""|start|end 时(非分区表),actualTable="" 需用原表名
         String queryTable = !actualTable.isEmpty() ? actualTable : config.getTableName();
 
-        List<Object> pkStart = parsePkValues(pkStartRaw);
-        List<Object> pkEnd = hasEndBound ? parsePkValues(pkEndRaw) : null;
+        List<Object> pkStart = PkRangeUtils.parsePkValues(pkStartRaw);
+        List<Object> pkEnd = hasEndBound ? PkRangeUtils.parsePkValues(pkEndRaw) : null;
 
         try (var data = targetTableRepository.streamByPkRange(
                 config.getDbName(), queryTable, pkColumns,
@@ -283,23 +283,6 @@ public class ChildBucketProcessor {
                 return null;
             });
         }
-    }
-
-    /** 将 PK 值的逗号串(如 "100,200")解析为 Object 列表 */
-    private static List<Object> parsePkValues(String raw) {
-        if (raw == null || raw.isEmpty()) return List.of();
-        String[] vals = raw.split(",", -1);
-        List<Object> result = new ArrayList<>(vals.length);
-        for (String v : vals) {
-            String t = v.trim();
-            if (t.isEmpty()) { result.add(null); continue; }
-            try {
-                result.add(t.contains(".") ? (Object) Double.parseDouble(t) : Long.parseLong(t));
-            } catch (NumberFormatException e) {
-                result.add(t); // 字符串 PK(UUID 等)
-            }
-        }
-        return result;
     }
 
     // ==================== 子命令结果 ====================
@@ -367,5 +350,4 @@ public class ChildBucketProcessor {
             log.warn("Failed to notify main command on sub-command failure: {}", e.getMessage());
         }
     }
-
-    }
+}

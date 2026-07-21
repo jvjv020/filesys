@@ -1,4 +1,4 @@
-package com.fmsy.transfer.download;
+package com.fmsy.transfer.download.multi;
 
 import com.fmsy.config.DataSourceConfig;
 import com.fmsy.model.Command;
@@ -13,7 +13,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 

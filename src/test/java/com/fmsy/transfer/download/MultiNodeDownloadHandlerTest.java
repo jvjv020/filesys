@@ -5,7 +5,8 @@ import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
-import com.fmsy.transfer.download.BucketDistributor;
+import com.fmsy.transfer.download.multi.BucketDistributor;
+import com.fmsy.transfer.download.multi.MultiNodeFlowService;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.ftp.FtpClient;
 import com.fmsy.util.ColumnNames;
@@ -37,16 +38,13 @@ class MultiNodeDownloadHandlerTest {
     private FtpClient ftpClient;
 
     @Mock
-    private SplitFlowService splitFlowService;
-
-    @Mock
-    private MergeFlowService mergeFlowService;
+    private MultiNodeFlowService multiNodeFlowService;
 
     @Mock
     private CommandRepository commandRepository;
 
     @InjectMocks
-    private MultiNodeDownloadHandler handler;
+    private com.fmsy.transfer.download.handler.MultiNodeDownloadHandler handler;
 
     private Command command;
     private TransferConfig config;
@@ -140,18 +138,9 @@ class MultiNodeDownloadHandlerTest {
 
             // SERIAL 模式改为异步切分,handle 中立即调用 markChildrenCreated 标记为 P
             // 再调用 startSplitAsync 异步执行
-            verify(splitFlowService).startSplitAsync(eq(command.getId()), eq(config),
+            verify(multiNodeFlowService).startSplitAsync(eq(command.getId()), eq(config),
                     any(Runnable.class), any());
             assertEquals(ColumnNames.STATUS_PROCESSING, result.getResult());
-        }
-
-        @Test
-        @DisplayName("should not call splitSync for SERIAL mode")
-        void shouldNotCallSplitSync() throws Exception {
-            handler.handle(command, config, result);
-
-            // 异步切分后不再调用同步 splitSync
-            verify(splitFlowService, never()).splitSync(any(), any());
         }
 
         @Test
@@ -162,7 +151,7 @@ class MultiNodeDownloadHandlerTest {
             doAnswer(invocation -> {
                 onComplete[0] = invocation.getArgument(2);
                 return null;
-            }).when(splitFlowService).startSplitAsync(eq(command.getId()), eq(config),
+            }).when(multiNodeFlowService).startSplitAsync(eq(command.getId()), eq(config),
                     any(Runnable.class), any());
 
             handler.handle(command, config, result);
@@ -175,7 +164,7 @@ class MultiNodeDownloadHandlerTest {
 
             verify(bucketDistributor).createChildCommands(command.getId(), "CAT001", "CTRL001",
                     baseFileInfo.fullPath());
-            verify(mergeFlowService).startMergeAsync(eq(1L), eq(config), eq(baseFileInfo),
+            verify(multiNodeFlowService).startMergeAsync(eq(1L), eq(config), eq(baseFileInfo),
                     any(Runnable.class), any(Runnable.class));
         }
 
@@ -186,7 +175,7 @@ class MultiNodeDownloadHandlerTest {
             doAnswer(invocation -> {
                 onComplete[0] = invocation.getArgument(2);
                 return null;
-            }).when(splitFlowService).startSplitAsync(eq(command.getId()), eq(config),
+            }).when(multiNodeFlowService).startSplitAsync(eq(command.getId()), eq(config),
                     any(Runnable.class), any());
 
             handler.handle(command, config, result);
@@ -199,7 +188,7 @@ class MultiNodeDownloadHandlerTest {
 
             verify(bucketDistributor).createChildCommands(command.getId(), "CAT001", "CTRL001",
                     baseFileInfo.fullPath());
-            verify(mergeFlowService, never()).startMergeAsync(any(), any(), any(), any(), any());
+            verify(multiNodeFlowService, never()).startMergeAsync(any(), any(), any(), any(), any());
             verify(commandRepository).updateStatus(command.getId(), ColumnNames.STATUS_SKIPPED);
         }
 
@@ -210,7 +199,7 @@ class MultiNodeDownloadHandlerTest {
             doAnswer(invocation -> {
                 onError[0] = invocation.getArgument(3);
                 return null;
-            }).when(splitFlowService).startSplitAsync(eq(command.getId()), eq(config),
+            }).when(multiNodeFlowService).startSplitAsync(eq(command.getId()), eq(config),
                     any(Runnable.class), any());
 
             handler.handle(command, config, result);
@@ -259,7 +248,7 @@ class MultiNodeDownloadHandlerTest {
 
             verify(bucketDistributor).prepareBatchChildren(command, config,
                     baseFileInfo.fullPath(), "REGION");
-            verify(mergeFlowService).startMergeAsync(eq(1L), eq(config), eq(baseFileInfo),
+            verify(multiNodeFlowService).startMergeAsync(eq(1L), eq(config), eq(baseFileInfo),
                     any(Runnable.class), any(Runnable.class));
             assertEquals(ColumnNames.STATUS_PROCESSING, result.getResult());
         }
@@ -273,7 +262,7 @@ class MultiNodeDownloadHandlerTest {
             handler.handle(command, config, result);
 
             assertEquals(ColumnNames.STATUS_ERROR, result.getResult());
-            verify(mergeFlowService, never()).startMergeAsync(any(), any(), any(), any(), any());
+            verify(multiNodeFlowService, never()).startMergeAsync(any(), any(), any(), any(), any());
         }
     }
 }
