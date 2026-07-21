@@ -7,7 +7,7 @@ import com.fmsy.model.Detail;
 import com.fmsy.model.FieldMapping;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
-import com.fmsy.transfer.BucketDistributor;
+import com.fmsy.transfer.download.BucketDistributor;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;

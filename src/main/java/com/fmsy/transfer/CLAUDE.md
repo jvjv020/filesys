@@ -1,7 +1,7 @@
 # transfer 模块 — 传输编排与处理
 
 ## 职责
-传输服务的核心编排层，包含入口服务、编排器、方向支持、Handler 实现、桶分发、占位符解析。
+传输服务的核心编排层，包含入口服务、编排器、方向支持、Handler 实现、占位符解析。
 
 ## 关键类
 
@@ -30,6 +30,7 @@
 ### 下载子包（`transfer/download/`）
 | 类 | 角色 |
 |---|------|
+| `BucketDistributor` | 桶分发（distinctBuckets / createBuckets / createChildCommands / prepareBatchChildren / prepareSerialChildren） |
 | `ChildBucketProcessor` | 子节点桶处理（竞争 → 查数据 → 写临时文件 → 生成 OK 哨兵） |
 | `SplitFlowService` | 主节点分桶（Plan B 逐块切分，写入明细表） |
 | `MergeFlowService` | 主节点合流程（轮询 Y 桶 → 检查 OK 文件 → APPE 合并 → 写标志） |
@@ -49,7 +50,6 @@
 ### 工具类
 | 类 | 角色 |
 |---|------|
-| `BucketDistributor` | 桶分发（distinctBuckets / createBuckets / createChildCommands / prepareBatchChildren / prepareSerialChildren） |
 | `FieldMappingBuilder` | 字段映射构建（buildForUpload 6 步 / buildForDownload 4 步） |
 | `PlaceholderResolver` | 占位符解析 `{var}` 语法 |
 | `TempTransferConfigFactory` | T 类型指令的 temp_config JSON → TransferConfig |

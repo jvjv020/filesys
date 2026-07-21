@@ -5,7 +5,7 @@ import com.fmsy.model.Command;
 import com.fmsy.model.Detail;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
-import com.fmsy.transfer.BucketDistributor;
+import com.fmsy.transfer.download.BucketDistributor;
 import com.fmsy.transfer.FieldMappingBuilder;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
@@ -141,7 +141,8 @@ class SingleNodeDownloadHandlerTest {
             when(fieldMappingBuilder.buildForDownload(config)).thenReturn(null);
 
             // 每个桶的管线返回成功结果(50条)
-            when(downloadSupport.executePipeline(eq("ftp1"), eq(config), any(), any()))
+            when(downloadSupport.executeBucketPipeline(eq("ftp1"), eq(config), any(), any(),
+                    any(), any(), anyBoolean(), anyBoolean(), any(), any(), any()))
                     .thenReturn(new DownloadSupport.PipelineResult(50, true, ColumnNames.STATUS_SUCCESS, ""));
         }
 
@@ -150,9 +151,10 @@ class SingleNodeDownloadHandlerTest {
         void shouldProcessSerialBuckets() throws Exception {
             handler.handle(command, config, result);
 
-            // 验证每个桶都调用了 executePipeline
-            verify(downloadSupport, times(2)).executePipeline(
-                    eq("ftp1"), eq(config), any(), any());
+            // 验证每个桶都调用了 executeBucketPipeline
+            verify(downloadSupport, times(2)).executeBucketPipeline(
+                    eq("ftp1"), eq(config), any(), any(),
+                    any(), any(), anyBoolean(), anyBoolean(), any(), any(), any());
             assertEquals(ColumnNames.STATUS_SUCCESS, result.getResult());
             assertEquals(100, result.getRecordCount());
         }
@@ -171,7 +173,8 @@ class SingleNodeDownloadHandlerTest {
         @DisplayName("should count pipeline failures as errors")
         void shouldCountPipelineFailures() throws Exception {
             // 第一个桶成功(50条),第二个桶失败
-            when(downloadSupport.executePipeline(eq("ftp1"), eq(config), any(), any()))
+            when(downloadSupport.executeBucketPipeline(eq("ftp1"), eq(config), any(), any(),
+                    any(), any(), anyBoolean(), anyBoolean(), any(), any(), any()))
                     .thenReturn(
                             new DownloadSupport.PipelineResult(50, true, ColumnNames.STATUS_SUCCESS, ""),
                             new DownloadSupport.PipelineResult(0, false, ColumnNames.STATUS_ERROR, ""));
@@ -202,7 +205,8 @@ class SingleNodeDownloadHandlerTest {
                     .thenReturn(List.of(bucket1, bucket2));
 
             // 每个桶的管线返回成功结果(50条)
-            when(downloadSupport.executePipeline(eq("ftp1"), eq(config), any(), any()))
+            when(downloadSupport.executeBucketPipeline(eq("ftp1"), eq(config), any(), any(),
+                    any(), any(), anyBoolean(), anyBoolean(), any(), any(), any()))
                     .thenReturn(new DownloadSupport.PipelineResult(50, true, ColumnNames.STATUS_SUCCESS, ""));
         }
 

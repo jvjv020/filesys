@@ -1,4 +1,4 @@
-package com.fmsy.transfer;
+package com.fmsy.transfer.download;
 
 import com.fmsy.config.DataSourceConfig;
 import com.fmsy.model.Detail;

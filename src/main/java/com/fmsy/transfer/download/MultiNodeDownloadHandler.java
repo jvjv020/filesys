@@ -5,7 +5,7 @@ import com.fmsy.model.Command;
 import com.fmsy.model.Result;
 import com.fmsy.model.TransferConfig;
 import com.fmsy.repository.CommandRepository;
-import com.fmsy.transfer.BucketDistributor;
+import com.fmsy.transfer.download.BucketDistributor;
 import com.fmsy.transfer.TransferHandler;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.ColumnNames;
