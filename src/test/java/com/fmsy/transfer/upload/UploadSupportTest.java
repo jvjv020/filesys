@@ -477,17 +477,15 @@ class UploadSupportTest {
     }
 
     @Nested
-    @DisplayName("UploadResult records")
+    @DisplayName("UploadResult")
     class UploadResultTests {
 
         @Test
-        @DisplayName("allSkipped should return result with skippedCount=1")
-        void allSkippedShouldHaveSkippedCount() {
+        @DisplayName("allSkipped 返回 SKIPPED 状态")
+        void allSkippedShouldHaveSkippedStatus() {
             var result = UploadSupport.UploadResult.allSkipped();
             assertEquals(0, result.records());
-            assertEquals(0, result.successCount());
-            assertEquals(1, result.skippedCount());
-            assertEquals(0, result.failedCount());
+            assertEquals(ColumnNames.STATUS_SKIPPED, result.status());
         }
     }
 
@@ -537,28 +535,4 @@ class UploadSupportTest {
         }
     }
 
-    @Nested
-    @DisplayName("normalizePathSlashes")
-    class NormalizePathSlashesTests {
-
-        @Test
-        @DisplayName("should normalize simple parent references")
-        void shouldNormalizeSimpleParents() {
-            assertEquals("/base/file.OK",
-                    UploadSupport.normalizePathSlashes("/base/sub/../file.OK"));
-        }
-
-        @Test
-        @DisplayName("should return path unchanged when no parent refs")
-        void shouldReturnUnchangedWhenNoParents() {
-            assertEquals("/data/export/file.OK",
-                    UploadSupport.normalizePathSlashes("/data/export/file.OK"));
-        }
-
-        @Test
-        @DisplayName("should handle null")
-        void shouldHandleNull() {
-            assertNull(UploadSupport.normalizePathSlashes(null));
-        }
-    }
 }

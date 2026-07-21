@@ -65,9 +65,7 @@ class SingleUploadHandlerTest {
 
     /** 返回指定 records 和 status 的 safeExecuteFilePipeline mock */
     private UploadSupport.UploadResult mockPipelineResult(int records, String status) {
-        int failed = ColumnNames.STATUS_ERROR.equals(status) ? 1 : 0;
-        int skipped = ColumnNames.STATUS_SKIPPED.equals(status) ? 1 : 0;
-        return new UploadSupport.UploadResult(records, 0, skipped, failed, status);
+        return new UploadSupport.UploadResult(records, status);
     }
 
     @BeforeEach
@@ -101,7 +99,7 @@ class SingleUploadHandlerTest {
         @DisplayName("应设置 SKIPPED 状态")
         void shouldSetSkippedWhenPreCheckReturnsFalse() throws Exception {
             when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any(), any(), any()))
                     .thenReturn(mockPipelineResult(0, ColumnNames.STATUS_SKIPPED));
 
             handler.handle(command, config, result);
@@ -120,7 +118,7 @@ class SingleUploadHandlerTest {
         @BeforeEach
         void setup() throws Exception {
             when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any(), any(), any()))
                     .thenReturn(mockPipelineResult(100, null));
         }
 
@@ -141,7 +139,7 @@ class SingleUploadHandlerTest {
             handler.handle(command, config, result);
 
             verify(uploadSupport).truncateTable(config);
-            verify(uploadSupport).safeExecuteFilePipeline(any(), any(), any(), any(), any());
+            verify(uploadSupport).safeExecuteFilePipeline(any(), any(), any(), any(), any(), any(), any());
         }
     }
 
@@ -154,7 +152,7 @@ class SingleUploadHandlerTest {
         @BeforeEach
         void setup() {
             when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any(), any(), any()))
                     .thenReturn(mockPipelineResult(0, ColumnNames.STATUS_ERROR));
         }
 
@@ -177,7 +175,7 @@ class SingleUploadHandlerTest {
         @DisplayName("空文件且 handling=ALLOW，应 SUCCESS")
         void shouldBeSuccessWhenEmptyFileAndAllow() throws Exception {
             when(transferSupport.resolveFilePath(config.getFilePath(), command)).thenReturn(fileInfo);
-            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any(), any(), any()))
                     .thenReturn(mockPipelineResult(0, null));
 
             config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
@@ -218,7 +216,7 @@ class SingleUploadHandlerTest {
             when(transferSupport.buildContext(command, "REGION", "EAST")).thenReturn(context);
             when(transferSupport.resolveFilePath(config.getFilePath(), context))
                     .thenReturn(ResolvedPath.of("/data/20260615/data001.csv"));
-            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any(), any(), any()))
                     .thenReturn(mockPipelineResult(100, null));
 
             handler.handle(command, config, result);
@@ -262,7 +260,7 @@ class SingleUploadHandlerTest {
             when(transferSupport.buildContext(command, "REGION", "EAST")).thenReturn(context);
             when(transferSupport.resolveFilePath(anyString(), any(Map.class)))
                     .thenReturn(ResolvedPath.of("/data/data001.csv"));
-            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any(), any(), any()))
                     .thenReturn(mockPipelineResult(0, ColumnNames.STATUS_SKIPPED));
 
             handler.handle(command, config, result);
@@ -280,7 +278,7 @@ class SingleUploadHandlerTest {
             when(transferSupport.buildContext(command, "REGION", "EAST")).thenReturn(context);
             when(transferSupport.resolveFilePath(anyString(), any(Map.class)))
                     .thenReturn(ResolvedPath.of("/data/data001.csv"));
-            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any()))
+            when(uploadSupport.safeExecuteFilePipeline(any(), any(), any(), any(), any(), any(), any()))
                     .thenReturn(mockPipelineResult(0, ColumnNames.STATUS_ERROR));
 
             handler.handle(command, config, result);
