@@ -341,8 +341,8 @@ public class MultiNodeFlowService {
             if (isMergeDone(mainCommandId, mergedIds.size())) {
                 log.info("Merge[{}] single file done, writing footer", mainCommandId);
                 writeFooterToFile(ftpName, targetPath, converter, mapping);
-                writeFlagFile(ftpName, config, baseFileInfo, totalCount, "SUB");
-                writeFlagFile(ftpName, config, baseFileInfo, totalCount, "TOTAL");
+                writeFlagFile(ftpName, config, baseFileInfo, totalCount, "U");
+                writeFlagFile(ftpName, config, baseFileInfo, totalCount, "T");
                 return true;
             }
             // 无桶时指数退避:3s → 6s → 12s → 24s → 30s(上限),减少空轮询
@@ -387,7 +387,7 @@ public class MultiNodeFlowService {
             if (ready.isEmpty()) {
                 if (isMergeDone(mainCommandId, mergedIds.size())) {
                     log.info("Merge[{}] all split files done", mainCommandId);
-                    writeFlagFile(ftpName, config, baseFileInfo, 0, "TOTAL");
+                    writeFlagFile(ftpName, config, baseFileInfo, 0, "T");
                     return true;
                 }
                 // 无桶时指数退避,减少空轮询
@@ -440,7 +440,7 @@ public class MultiNodeFlowService {
                 if (remaining == 0 && finalizedTargets.add(fv)) {
                     log.info("Merge[{}] file done: {}", mainCommandId, targetPath);
                     writeFooterToFile(ftpName, targetPath, converter, mapping);
-                    writeFlagFile(ftpName, config, baseFileInfo, groupCount, "SUB");
+                    writeFlagFile(ftpName, config, baseFileInfo, groupCount, "U");
                 }
             });
         }

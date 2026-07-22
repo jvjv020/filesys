@@ -442,12 +442,12 @@ public class UploadSupport {
      * 从传输配置的前置操作中提取标志文件的完整路径。
      *
      * <p>
-     * 解析 preOperations 字符串，找到第一个 FLAG 或 READY 操作，提取路径模式
-     * 并解析文件衍生变量（{stem}, {name}, {ext}, {dir} 等）。
+     * 解析 preOperations 字符串，找到第一个 L 操作，提取路径模式
+     * 并展开文件名短码和文件衍生变量。
      *
-     * @param preOps   前置操作字符串，如 "FLAG:{stem}.OK" 或 "READY:{stem}.ready"
+     * @param preOps   前置操作字符串，如 "L:S.ok" 或 "L:*.flg"
      * @param fileInfo 数据文件的路径信息，用于解析文件衍生变量
-     * @return 解析后的标志文件完整路径；没有 FLAG/READY 操作时返回 null
+     * @return 解析后的标志文件完整路径；没有 L 操作时返回 null
      */
     public static String resolveConfiguredFlagPath(String preOps, ResolvedPath fileInfo) {
         if (fileInfo == null)
@@ -456,15 +456,18 @@ public class UploadSupport {
         if (pathPattern == null)
             return null;
 
-        // 展开文件衍生变量
-        String resolved = TransferSupport.expandPathVariables(pathPattern, fileInfo);
+        // 1. 展开文件名短码 (S → {stem}, D → {dir})
+        String expanded = FlagFileService.expandFileNameShortCodes(pathPattern);
 
-        // 相对路径 → 继承数据文件的目录
+        // 2. 展开文件衍生变量
+        String resolved = TransferSupport.expandPathVariables(expanded, fileInfo);
+
+        // 3. 相对路径 → 继承数据文件的目录
         if (!resolved.startsWith("/") && fileInfo.dir() != null && !fileInfo.dir().isEmpty()) {
             resolved = fileInfo.dir() + "/" + resolved;
         }
 
-        // 规范化 .. 段
+        // 4. 规范化 .. 段
         return FlagFileService.normalizePath(resolved);
     }
 

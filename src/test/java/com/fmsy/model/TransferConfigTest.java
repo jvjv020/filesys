@@ -131,16 +131,16 @@ class TransferConfigTest {
         @DisplayName("should store and retrieve preOperations")
         void shouldStoreAndRetrievePreOperations() {
             TransferConfig config = new TransferConfig();
-            config.setPreOperations("READY:/data/file.txt");
-            assertEquals("READY:/data/file.txt", config.getPreOperations());
+            config.setPreOperations("L:/data/file.txt");
+            assertEquals("L:/data/file.txt", config.getPreOperations());
         }
 
         @Test
         @DisplayName("should store and retrieve postOperations")
         void shouldStoreAndRetrievePostOperations() {
             TransferConfig config = new TransferConfig();
-            config.setPostOperations("FB:{X}.fbk;L");
-            assertEquals("FB:{X}.fbk;L", config.getPostOperations());
+            config.setPostOperations("F:S.fbk;11");
+            assertEquals("F:S.fbk;11", config.getPostOperations());
         }
 
         @Test
@@ -184,8 +184,8 @@ class TransferConfigTest {
             config.setFtpName("ftp1");
             config.setFilePath("/upload/{YYYYMMDD}.dbf");
             config.setParserType("DBF");
-            config.setPreOperations("READY:{name}");
-            config.setPostOperations("FB:{stem}.fbk;L S M");
+            config.setPreOperations("L:N");
+            config.setPostOperations("F:S.fbk;03");
 
             assertEquals("EMP", config.getCategoryCode());
             assertEquals("UPL", config.getControlCode());

@@ -426,7 +426,7 @@ class UploadSupportTest {
         @DisplayName("should move data file and flag file to error dir")
         void shouldMoveDataAndFlagFile() {
             TransferConfig config = new TransferConfig();
-            config.setPreOperations("FLAG:{stem}.OK");
+            config.setPreOperations("L:S.OK");
             when(ftpClient.exists("/data/file.OK")).thenReturn(true);
             when(ftpClient.moveToErrorDir("/data/file.csv")).thenReturn("/error/file.csv");
             when(ftpClient.moveToErrorDir("/data/file.OK")).thenReturn("/error/file.OK");
@@ -441,7 +441,7 @@ class UploadSupportTest {
         @DisplayName("should handle move failure gracefully")
         void shouldHandleMoveFailure() {
             TransferConfig config = new TransferConfig();
-            config.setPreOperations("FLAG:{stem}.OK");
+            config.setPreOperations("L:S.OK");
             when(ftpClient.moveToErrorDir("/data/file.csv")).thenThrow(new RuntimeException("Move failed"));
 
             // Should not throw
@@ -494,34 +494,34 @@ class UploadSupportTest {
     class ResolveConfiguredFlagPathTests {
 
         @Test
-        @DisplayName("should resolve FLAG with stem pattern")
+        @DisplayName("should resolve L with stem pattern")
         void shouldResolveFlagStemPattern() {
             ResolvedPath fileInfo = ResolvedPath.of("/data/export/file.csv");
-            String result = UploadSupport.resolveConfiguredFlagPath("FLAG:{stem}.OK", fileInfo);
+            String result = UploadSupport.resolveConfiguredFlagPath("L:S.OK", fileInfo);
             assertEquals("/data/export/file.OK", result);
         }
 
         @Test
-        @DisplayName("should resolve FLAG with mode suffix")
+        @DisplayName("should resolve L with content code suffix")
         void shouldResolveFlagWithMode() {
             ResolvedPath fileInfo = ResolvedPath.of("/data/file.csv");
-            String result = UploadSupport.resolveConfiguredFlagPath("FLAG:{stem}.OK;L", fileInfo);
+            String result = UploadSupport.resolveConfiguredFlagPath("L:S.OK;03", fileInfo);
             assertEquals("/data/file.OK", result);
         }
 
         @Test
-        @DisplayName("should resolve READY pattern")
+        @DisplayName("should resolve L without short codes (basic pattern)")
         void shouldResolveReadyPattern() {
             ResolvedPath fileInfo = ResolvedPath.of("/data/file.csv");
-            String result = UploadSupport.resolveConfiguredFlagPath("READY:{stem}.ready", fileInfo);
-            assertEquals("/data/file.ready", result);
+            String result = UploadSupport.resolveConfiguredFlagPath("L:*.ready", fileInfo);
+            assertEquals("/data/*.ready", result);
         }
 
         @Test
-        @DisplayName("should return null when no FLAG/READY in ops")
+        @DisplayName("should return null when no L operation in ops")
         void shouldReturnNullWhenNoFlagOrReady() {
             ResolvedPath fileInfo = ResolvedPath.of("/data/file.csv");
-            assertNull(UploadSupport.resolveConfiguredFlagPath("DEL:old.csv", fileInfo));
+            assertNull(UploadSupport.resolveConfiguredFlagPath("D:old.csv", fileInfo));
             assertNull(UploadSupport.resolveConfiguredFlagPath("", fileInfo));
             assertNull(UploadSupport.resolveConfiguredFlagPath(null, fileInfo));
         }
@@ -530,7 +530,7 @@ class UploadSupportTest {
         @DisplayName("should handle name pattern")
         void shouldResolveNamePattern() {
             ResolvedPath fileInfo = ResolvedPath.of("/data/file.csv");
-            String result = UploadSupport.resolveConfiguredFlagPath("FLAG:{name}.flag", fileInfo);
+            String result = UploadSupport.resolveConfiguredFlagPath("L:N.flag", fileInfo);
             assertEquals("/data/file.csv.flag", result);
         }
     }

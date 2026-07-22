@@ -235,8 +235,8 @@ class TempTransferConfigFactoryTest {
                     "\"serialFlag\":\"Y\"," +
                     "\"nodeId\":\"node-3\"," +
                     "\"parserConfig\":\"{\\\"encoding\\\":\\\"GBK\\\"}\"," +
-                    "\"preOperations\":\"READY:/flag.txt\"," +
-                    "\"postOperations\":\"SUB:/sub.flg;L\"," +
+                    "\"preOperations\":\"L:/flag.txt\"," +
+                    "\"postOperations\":\"U:/sub.flg;11\"," +
                     "\"ignoreFields\":\"col1,col2\"," +
                     "\"splitFields\":\"REGION,STATUS\"" +
                     "}");
@@ -248,8 +248,8 @@ class TempTransferConfigFactoryTest {
             assertEquals("Y", config.getSerialFlag());
             assertEquals("node-3", config.getNodeId());
             assertNotNull(config.getParserConfig());
-            assertEquals("READY:/flag.txt", config.getPreOperations());
-            assertEquals("SUB:/sub.flg;L", config.getPostOperations());
+            assertEquals("L:/flag.txt", config.getPreOperations());
+            assertEquals("U:/sub.flg;11", config.getPostOperations());
             assertEquals("col1,col2", config.getIgnoreFields());
             assertEquals("REGION,STATUS", config.getSplitFields());
         }

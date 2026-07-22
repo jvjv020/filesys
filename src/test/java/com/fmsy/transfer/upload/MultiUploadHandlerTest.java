@@ -131,7 +131,7 @@ class MultiUploadHandlerTest {
         @Test
         @DisplayName("预扫描应过滤标志文件")
         void shouldPrescanAndFilterFlagFiles() throws Exception {
-            config.setPreOperations("FLAG:{stem}.OK");
+            config.setPreOperations("L:S.ok");
             String[] allFiles = {"/data/files/data1.csv", "/data/files/data1.OK",
                     "/data/files/data2.csv", "/data/files/data2.OK"};
             when(ftpClient.listFiles(anyString())).thenReturn(allFiles);
@@ -167,7 +167,7 @@ class MultiUploadHandlerTest {
         @Test
         @DisplayName("所有文件被预扫描过滤时应返回 SKIPPED")
         void shouldReturnSkippedWhenAllFiltered() throws Exception {
-            config.setPreOperations("FLAG:{stem}.OK");
+            config.setPreOperations("L:S.ok");
             // 只有标志文件，没有数据文件
             String[] allFiles = {"/data/files/data1.OK"};
             when(ftpClient.listFiles(anyString())).thenReturn(allFiles);
@@ -180,7 +180,7 @@ class MultiUploadHandlerTest {
         @DisplayName("空数据处理应 ALLOW")
         void shouldHandleEmptyDataAllow() throws Exception {
             config.setEmptyDataHandling(EmptyDataHandling.ALLOW);
-            config.setPreOperations("FLAG:{stem}.OK");
+            config.setPreOperations("L:S.ok");
             String[] allFiles = {"/data/files/data1.csv", "/data/files/data1.OK"};
             when(ftpClient.listFiles(anyString())).thenReturn(allFiles);
 
@@ -192,7 +192,7 @@ class MultiUploadHandlerTest {
         @DisplayName("空数据处理应 SKIP")
         void shouldHandleEmptyDataSkip() throws Exception {
             config.setEmptyDataHandling(EmptyDataHandling.SKIP);
-            config.setPreOperations("FLAG:{stem}.OK");
+            config.setPreOperations("L:S.ok");
             String[] allFiles = {"/data/files/data1.csv", "/data/files/data1.OK"};
             when(ftpClient.listFiles(anyString())).thenReturn(allFiles);
 

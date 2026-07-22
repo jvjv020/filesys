@@ -282,15 +282,15 @@ class TransferSupportTest {
         @DisplayName("should delegate pre check to flag file service")
         void shouldDelegatePreCheckToFlagFileService() {
             TransferConfig config = new TransferConfig();
-            config.setPreOperations("READY:/data/file.csv");
+            config.setPreOperations("L:/data/file.csv");
             ResolvedPath fileInfo = ResolvedPath.of("/data/file.csv");
-            when(flagFileService.preCheck(ftpClient, "READY:/data/file.csv", fileInfo))
+            when(flagFileService.preCheck(ftpClient, "L:/data/file.csv", fileInfo))
                     .thenReturn(true);
 
             boolean result = transferSupport.preCheck(ftpClient, config, fileInfo);
 
             assertTrue(result);
-            verify(flagFileService).preCheck(ftpClient, "READY:/data/file.csv", fileInfo);
+            verify(flagFileService).preCheck(ftpClient, "L:/data/file.csv", fileInfo);
         }
     }
 
@@ -302,13 +302,13 @@ class TransferSupportTest {
         @DisplayName("should delegate post process to flag file service")
         void shouldDelegatePostProcessToFlagFileService() {
             TransferConfig config = new TransferConfig();
-            config.setPostOperations("FB:/feedback.txt;L");
+            config.setPostOperations("F:/feedback.txt;11");
             ResolvedPath fileInfo = ResolvedPath.of("/data/file.csv");
             Map<String, String> extraValues = Map.of("L", "100");
 
             transferSupport.postProcess(ftpClient, config, fileInfo, extraValues);
 
-            verify(flagFileService).process(ftpClient, "FB:/feedback.txt;L", fileInfo, extraValues);
+            verify(flagFileService).process(ftpClient, "F:/feedback.txt;11", fileInfo, extraValues, null, null);
         }
 
         @Test

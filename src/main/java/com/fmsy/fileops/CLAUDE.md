@@ -7,32 +7,94 @@
 
 | 类 | 角色 |
 |---|------|
-| `FlagFileService` | 标志文件处理服务，短关键字语法体系 |
+| `FlagFileService` | 标志文件处理服务，短关键字 + 内容编号 + 文件名短码体系 |
 | `MessageSender` | 消息发送服务（LOG / WEBHOOK 通道） |
+| `MessageConfigService` | 消息配置缓存服务，从 DB 加载到内存 |
+| `ContentCode` | 内容编号枚举，定义编号到模板的映射 |
 
-## 前置操作语法
-- `READY:path` — 检查文件存在
-- `FLAG:path` — 检查标志存在
-- `FLAG:path;mode` — 标志内容 vs 数据文件计算值
-- `FLAG:path;expect;mode` — 显式期望值 vs 数据文件计算值
+## 前置操作语法（preOperations）
 
-## 后置操作语法
-- `FB:path;content` — 反馈文件
-- `SUB:path;content` — 子标志文件
-- `TOTAL:path;content` — 总标志文件
-- `DEL:path` — 删除匹配文件
-- `REN:from;to` — 重命名
-- `MSG:target;body` — 发送消息
+格式：`L:path[;nn]`，多个以 `,` 分隔
+
+| 模式 | 示例 | 说明 |
+|------|------|------|
+| 仅检查存在 | `L:*.flg` | 文件存在则通过，不存在则跳过（N） |
+| 检查存在 + 内容比对 | `L:S.ok;03` | 读取标志文件内容，按编号 03 计算数据文件值，比对 |
+| 等效于旧 READY | `L:ready.txt` | 省略内容编号 = 仅检查存在 |
+
+## 后置操作语法（postOperations）
+
+格式：`KEYWORD:path[;nn]`，多个以 `,` 分隔
+
+| 关键字 | 说明 | 示例 |
+|--------|------|------|
+| `F` | 反馈文件 | `F:S.ret;01` — 生成 `{stem}.ret`，内容为 SUCCESS |
+| `U` | 子标志文件 | `U:S.ready;02` — 生成 `{stem}.ready`，内容为 OK |
+| `T` | 总标志文件 | `T:../W.flag;02` — 生成 `../{dn}.flag`，内容为 OK |
+| `D` | 删除匹配文件 | `D:*.ok` — 删除 `*.ok` 文件 |
+| `R` | 重命名 | `R:*.flg;*.done` — `*` 替换为源文件名 |
+| `M` | 发送消息 | `M` — 从 config 的 类别+控制 代号查消息表发送 |
+
+## 内容编号（ContentCode）
+
+| 编号 | 含义 | 模板 |
+|------|------|------|
+| `00` | 空内容 | 空字符串 |
+| `01` | 成功 | `SUCCESS` |
+| `02` | 完成 | `OK` |
+| `03` | 行数+大小+MD5 | `L S M` |
+| `04` | 行数+大小 | `L S` |
+| `05` | 记录数 | `C` |
+| `06` | 文件名+大小+MD5 | `F S M` |
+| `07` | 文件名(去扩展)+MD5 | `X M` |
+| `08` | 时间戳 | `N` |
+| `09` | 日期 | `D` |
+| `10` | 时间 | `T` |
+| `11` | 行数 | `L` |
+| `12` | 大小 | `S` |
+| `13` | MD5 | `M` |
+
+省略编号 = `00`（空内容），生成空文件或只检查存在。
+
+## 文件名短码
+
+在路径中出现的单字母短码自动展开：
+
+| 短码 | 含义 | 示例 |
+|------|------|------|
+| `S` | `{stem}` | `S.ok` → `{stem}.ok` → `file.ok` |
+| `N` | `{name}` | `N.flag` → `{name}.flag` → `file.csv.flag` |
+| `E` | `{ext}` | `E` → `{ext}` → `.csv` |
+| `D` | `{dir}` | `D/S.flg` → `{dir}/{stem}.flg` |
+| `W` | `{dn}` | `W.flag` → `{dn}.flag` → `export.flag` |
+| `H` | `{up}` | `H/S.flg` → `{up}/{stem}.flg` |
+| `P` | `{path}` | `P` → `{path}` → `/data/export/file.csv` |
+
+短码仅在两侧都不是字母时替换，避免误伤普通单词（如 `DATA` 中的 S 不替换）。
 
 ## 路径继承
+
 不以 `/` 开头的 pattern 自动加 `{dir}/` 前缀（同目录）。支持 `..` 父目录遍历。
 
-## 模式码
-`L`(行数) `S`(字节数) `M`(MD5) `C`(处理记录数) `N`(时间戳) `D`(日期) `T`(时间) `F`(文件名) `X`(stem) `E`(扩展名) `P`(完整路径)
+## 消息配置表（MessageConfig）
 
-单字母模式码独立出现时替换，多字母大写词（`SUCCESS` / `OK` / `ERROR`）保持原样。
+MSG 操作通过类别代号+控制代号在消息配置表中查找配置：
+
+| 字段 | 说明 |
+|------|------|
+| 类别代号 | 与 TransferConfig 的类别代号对应 |
+| 控制代号 | 与 TransferConfig 的控制代号对应 |
+| 通道类型 | `LOG` / `WEBHOOK` |
+| 目标地址 | logger name 或 webhook URL |
+| 消息模板 | 支持 `{result}`、`{file}`、`{count}` 等占位符 |
 
 ## MessageSender 通道
 - `LOG:loggerName` — SLF4J INFO 日志
 - `WEBHOOK:url` — HTTP POST JSON，含指数退避重试（3 次）
 - `MAIL` / `SMS` / `MQ` — 未实现，仅 warn 占位
+
+## 设计要点
+- **对称性**：生成和检查共用同一套内容编号，03 生成的标志文件可用 03 校验
+- **空内容**：编号 00 或省略 = 空，生成空文件 / 只检查存在
+- **MSG 无参**：MSG 不写消息内容，从消息配置表按代号查找
+- **文件名短码**：替代旧 `{stem}`/`{name}` 等长变量名，路径更紧凑

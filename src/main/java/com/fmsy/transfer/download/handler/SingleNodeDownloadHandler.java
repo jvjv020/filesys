@@ -117,8 +117,8 @@ public class SingleNodeDownloadHandler implements TransferHandler {
                 splitFields, sharedMapping, concurrency, commandType, config.getNodeId());
 
         /* ---------- Phase 5: 总标志文件(仅在所有桶成功时生成) ---------- */
-        if (br.isAllSuccess() && postOps != null && postOps.contains("TOTAL")) {
-            String totalFlagOps = FlagFileService.filterOpsByType(postOps, "TOTAL");
+        if (br.isAllSuccess() && postOps != null && postOps.contains("T")) {
+            String totalFlagOps = FlagFileService.filterOpsByType(postOps, "T");
             if (totalFlagOps != null) {
                 transferSupport.executeWithClient(config.getFtpName(), postClient -> {
                     transferSupport.postProcess(postClient, totalFlagOps, baseFileInfo, null);
@@ -198,7 +198,7 @@ public class SingleNodeDownloadHandler implements TransferHandler {
             DownloadSupport.PipelineResult pr = downloadSupport.executeBucketPipeline(
                     ftpName, config, targetFileInfo,
                     bucket.getFieldValue(), expectedAuditCount, sharedMapping,
-                    false, false, "SUB", bucket, nodeId);
+                    false, false, "U", bucket, nodeId);
 
             result.accumulate(pr, targetFileInfo != null ? targetFileInfo.fullPath() : null);
 

@@ -2,6 +2,7 @@ package com.fmsy.fileops;
 
 import com.fmsy.exception.FlagCheckException;
 import com.fmsy.ftp.FtpClient;
+import com.fmsy.model.MessageConfig;
 import com.fmsy.transfer.TransferSupport;
 import com.fmsy.util.ResolvedPath;
 import lombok.extern.slf4j.Slf4j;
@@ -16,43 +17,43 @@ import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 标志文件处理服务 — 短关键字 + 模式码体系。
+ * 标志文件处理服务 — 短关键字 + 内容编号 + 文件名短码体系。
  *
  * <p><b>前置操作</b>（在 TransferSupport.preCheck 中使用）：
  * <ul>
- *   <li>READY:path — 仅检查文件存在</li>
- *   <li>FLAG:path — 仅检查标志存在</li>
- *   <li>FLAG:path;mode — 标志内容 vs 数据文件计算值，按 mode 比对</li>
- *   <li>FLAG:path;expect;mode — 显式期望值 vs 数据文件计算值</li>
+ *   <li>L:path — 仅检查文件存在（等价于旧 READY）</li>
+ *   <li>L:path;nn — 检查标志存在，按内容编号 nn 比对内容</li>
  * </ul>
  *
  * <p><b>后置操作</b>（通过 process() 执行）：
  * <ul>
- *   <li>SUB:path;content — 子标志文件</li>
- *   <li>FB:path;content — 反馈文件</li>
- *   <li>TOTAL:path;content — 总标志文件</li>
- *   <li>DEL:path — 删除匹配文件</li>
- *   <li>REN:from;to — 重命名（* 替换为源文件名）</li>
- *   <li>MSG:target;body — 发送消息</li>
+ *   <li>F:path;nn — 反馈文件</li>
+ *   <li>U:path;nn — 子标志文件</li>
+ *   <li>T:path;nn — 总标志文件</li>
+ *   <li>D:path — 删除匹配文件</li>
+ *   <li>R:from;to — 重命名（* 替换为源文件名）</li>
+ *   <li>M — 发送消息（从 config 取代号查消息表）</li>
  * </ul>
+ *
+ * <p><b>文件名短码</b>（在路径中出现时展开）：
+ * <ul>
+ *   <li>S → {stem}  N → {name}  E → {ext}</li>
+ *   <li>D → {dir}  W → {dn}  H → {up}  P → {path}</li>
+ * </ul>
+ * 示例：{@code S.ok} → {@code {stem}.ok}，{@code D/S.flg} → {@code {dir}/{stem}.flg}
  *
  * <p><b>路径继承</b>：不以 "/" 开头的 pattern 自动加 "{dir}/" 前缀。
  *
- * <p><b>模式码</b>（content 和 FLAG mode 共用）：
+ * <p><b>内容编号</b>：见 {@link ContentCode}，生成和检查共用同一套编号（对称性）。
+ * 编号 {@code 00}（空内容）或省略时：
  * <ul>
- *   <li>L — 行数  S — 字节数  M — MD5  C — 处理记录数</li>
- *   <li>N — 时间戳  D — 日期  T — 时间</li>
- *   <li>F — 文件名(含扩展)  X — 文件名(去扩展)  E — 扩展名  P — 完整路径</li>
- * </ul>
- *
- * <p>FLAG mode 语法：{@code [#|@]L|M|S[=|>|<|>=|<=|!=] | ?}
- * <ul>
- *   <li># — 从数据文件计算  @ — 从标志文件读取（默认）</li>
- *   <li>? — 仅检查存在</li>
+ *   <li>L 场景：只检查文件存在，不比对内容</li>
+ *   <li>F/U/T 场景：生成空文件</li>
  * </ul>
  */
 @Slf4j
@@ -63,150 +64,171 @@ public class FlagFileService {
     private final Map<String, FlagOperation> operations = new ConcurrentHashMap<>();
 
     private final ContentEngine contentEngine = new ContentEngine();
+    private final MessageConfigService messageConfigService;
 
-    public FlagFileService() {
-        this(new MessageSender());
+    /**
+     * 文件名短码 → 完整变量名 映射表。
+     * 单字母短码仅在独立出现（不与相邻字母连写）时替换。
+     */
+    private static final Map<Character, String> FILE_SHORT_CODES = new HashMap<>();
+
+    static {
+        FILE_SHORT_CODES.put('S', "{stem}");
+        FILE_SHORT_CODES.put('N', "{name}");
+        FILE_SHORT_CODES.put('E', "{ext}");
+        FILE_SHORT_CODES.put('D', "{dir}");
+        FILE_SHORT_CODES.put('W', "{dn}");
+        FILE_SHORT_CODES.put('H', "{up}");
+        FILE_SHORT_CODES.put('P', "{path}");
     }
 
-    public FlagFileService(MessageSender messageSender) {
-        operations.put("SUB", new GenerateOp("sub flag", contentEngine));
-        operations.put("FB", new GenerateOp("feedback", contentEngine));
-        operations.put("TOTAL", new GenerateOp("total flag", contentEngine));
-        operations.put("DEL", new DeleteOp());
-        operations.put("REN", new RenameOp());
-        operations.put("MSG", new SendMessageOp(messageSender));
+    public FlagFileService(MessageConfigService messageConfigService) {
+        this(messageConfigService, new MessageSender());
+    }
+
+    public FlagFileService(MessageConfigService messageConfigService, MessageSender messageSender) {
+        this.messageConfigService = messageConfigService;
+        operations.put("U", new GenerateOp("sub flag", contentEngine));
+        operations.put("F", new GenerateOp("feedback", contentEngine));
+        operations.put("T", new GenerateOp("total flag", contentEngine));
+        operations.put("D", new DeleteOp());
+        operations.put("R", new RenameOp());
+        operations.put("M", new SendMessageOp(messageSender, messageConfigService));
+    }
+
+    // ==================== 文件名短码展开 ====================
+
+    /**
+     * 展开路径中的文件名短码为完整变量名。
+     *
+     * <p>单字母短码仅在两侧都不是字母时替换，避免误伤普通单词。
+     * 例如 "S.ok" → "{stem}.ok"，"DATA" 中的 S 不替换。
+     *
+     * @param path 含短码的路径，如 "S.ok" 或 "D/S.flg"
+     * @return 展开后的路径，如 "{stem}.ok" 或 "{dir}/{stem}.flg"
+     */
+    public static String expandFileNameShortCodes(String path) {
+        if (path == null || path.isEmpty()) return path;
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < path.length(); i++) {
+            char c = path.charAt(i);
+            // 检查是否已知短码且独立出现
+            if (FILE_SHORT_CODES.containsKey(c)) {
+                boolean prevIsLetter = i > 0 && Character.isLetter(path.charAt(i - 1));
+                boolean nextIsLetter = i + 1 < path.length() && Character.isLetter(path.charAt(i + 1));
+                if (!prevIsLetter && !nextIsLetter) {
+                    sb.append(FILE_SHORT_CODES.get(c));
+                    continue;
+                }
+            }
+            sb.append(c);
+        }
+        return sb.toString();
     }
 
     // ==================== 前置检查方法 ====================
 
     /**
-     * 前置检查入口 — 解析 READY/FLAG 操作串。
+     * 前置检查入口 — 解析 L（Flag Check）操作串。
      *
-     * @param opsStr  前置操作字符串，多个以 "," 分隔
-     * @param fileInfo 数据文件的 ResolvedPath，用于 {stem}/{dir} 等路径变量和 L/S/M 计算
+     * <p>格式：L:path[;nn]，多个以 "," 分隔。
+     * 省略 nn 或 nn=00 时只检查文件存在；nn 非空时按内容编号比对。
+     *
+     * @param opsStr   前置操作字符串，如 "L:S.ok;03" 或 "L:*.flg"
+     * @param fileInfo 数据文件的 ResolvedPath，用于路径继承和变量替换
      * @return true=通过，false=跳过
      */
     public boolean preCheck(FtpClient client, String opsStr, ResolvedPath fileInfo) {
         if (opsStr == null || opsStr.isEmpty()) return true;
 
         for (String op : opsStr.split(",")) {
-            String[] parts = op.split(";");
-            String keyword = parts.length > 0 ? parts[0].trim() : "";
-            if (keyword.isEmpty()) continue; // 跳过空段
+            op = op.trim();
+            if (op.isEmpty()) continue;
 
-            switch (keyword) {
-                case "READY" -> {
-                    String pattern = resolvePath(parts, 1, fileInfo);
-                    if (!checkReady(client, pattern)) return false;
-                }
-                case "FLAG" -> {
-                    String pattern = resolvePath(parts, 1, fileInfo);
-                    if (parts.length == 2) {
-                        // FLAG:path → 仅检查存在
-                        if (!checkReady(client, pattern)) return false;
-                    } else if (parts.length == 3) {
-                        // FLAG:path;mode
-                        String mode = parts[2].trim();
-                        if (!checkFlagByMode(client, pattern, mode, fileInfo)) return false;
-                    } else if (parts.length >= 4) {
-                        // FLAG:path;expect;mode
-                        String expectVal = parts[2].trim();
-                        String mode = parts[3].trim();
-                        if (!checkFlagByMode(client, pattern, mode, expectVal, fileInfo)) return false;
-                    }
-                }
-                default ->
-                    log.warn("Unknown pre-operation keyword: {}", keyword);
+            // 格式: L:path[;nn]
+            int colonIdx = op.indexOf(':');
+            if (colonIdx <= 0) {
+                log.warn("Invalid pre-operation format: {}", op);
+                continue;
+            }
+            String keyword = op.substring(0, colonIdx).trim();
+            String rest = op.substring(colonIdx + 1).trim();
+
+            if (!"L".equals(keyword)) {
+                log.warn("Unknown pre-operation keyword: {}", keyword);
+                continue;
+            }
+
+            // 解析 rest = path[;nn]
+            String[] parts = rest.split(";");
+            String path = parts[0].trim();
+            String code = parts.length > 1 ? parts[1].trim() : "";
+            String pattern = resolvePath(path, fileInfo);
+
+            if (ContentCode.isEmpty(code)) {
+                // L:path 或 L:path;00 — 仅检查存在
+                if (!checkExists(client, pattern)) return false;
+            } else {
+                // L:path;nn — 内容比对
+                if (!checkFlagByCode(client, pattern, code, fileInfo)) return false;
             }
         }
         return true;
     }
 
     /** 仅检查文件存在 */
-    public boolean checkReady(FtpClient client, String filePattern) {
+    public boolean checkExists(FtpClient client, String filePattern) {
         boolean exists = client.exists(filePattern);
         if (!exists) {
-            log.warn("Ready/flag file not found: {}", filePattern);
+            log.warn("File not found: {}", filePattern);
         }
         return exists;
     }
 
     /**
-     * FLAG 自动模式：标志文件内容作为期望值，按 mode 计算数据文件实际值，比对。
+     * FLAG 按内容编号比对：读取标志文件内容，按编号模板计算数据文件实际值，比对。
      */
-    private boolean checkFlagByMode(FtpClient client, String flagPattern, String mode,
-                                     ResolvedPath dataFile) {
-        if ("?".equals(mode)) {
-            return checkReady(client, flagPattern);
-        }
-        // 先检查标志文件是否存在，不存在则跳过（N）
-        if (!checkReady(client, flagPattern)) {
+    private boolean checkFlagByCode(FtpClient client, String flagPattern, String codeStr,
+                                    ResolvedPath dataFile) {
+        // 先检查标志文件是否存在
+        if (!checkExists(client, flagPattern)) {
             return false;
         }
-        // 文件存在，读内容作为期望值；空内容应视为校验失败（E）
+        // 读内容作为期望值
         String expect = readFlagContent(client, flagPattern);
         if (expect == null) {
             throw new FlagCheckException("FLAG file is empty: " + flagPattern);
         }
-        return checkFlagCompare(client, flagPattern, expect, mode, dataFile);
-    }
-
-    /**
-     * FLAG 显式模式：expect 字面作为期望值，按 mode 计算数据文件实际值，比对。
-     */
-    private boolean checkFlagByMode(FtpClient client, String flagPattern, String mode,
-                                     String expect, ResolvedPath dataFile) {
-        return checkFlagCompare(client, flagPattern, expect, mode, dataFile);
-    }
-
-    /**
-     * FLAG 比对核心：根据 mode 解析取值码和比较符，计算实际值，比对。
-     * 比对不通过时抛出 {@link FlagCheckException}（标记 E），
-     * 文件不存在等基础检查失败仍返回 false（标记 N）。
-     */
-    private boolean checkFlagCompare(FtpClient client, String flagPattern,
-                                      String expect, String mode, ResolvedPath dataFile) {
-        // 解析 mode:  [@|#]L|M|S[=|>|<|>=|<=|!=]
-        String metricStr;
-        String comparison = "=";
-
-        String m = mode.trim();
-        if (m.startsWith("@") || m.startsWith("#")) {
-            m = m.substring(1); // 剥离 @/# 前缀
-        }
-
-        // 提取比较符
-        int opStart = -1;
-        for (int i = 0; i < m.length(); i++) {
-            char c = m.charAt(i);
-            if (c == '=' || c == '>' || c == '<' || c == '!') {
-                opStart = i;
-                break;
-            }
-        }
-        if (opStart >= 0) {
-            metricStr = m.substring(0, opStart);
-            comparison = m.substring(opStart);
-        } else {
-            metricStr = m;
-        }
-
-        // 计算实际值
-        String actual = computeMetric(client, metricStr, dataFile);
+        // 按编号模板计算数据文件实际值
+        String actual = computeFromTemplate(client, codeStr, dataFile);
         if (actual == null) {
-            throw new FlagCheckException("FLAG check failed: unable to compute metric '" + metricStr
-                    + "' for " + dataFile);
+            throw new FlagCheckException("FLAG check failed: unable to compute content code '"
+                    + codeStr + "' for " + dataFile);
         }
-
-        // 执行比对
-        boolean pass = compareValues(expect, actual, comparison);
+        // 比对
+        boolean pass = expect.trim().equals(actual.trim());
         if (!pass) {
-            String msg = String.format("FLAG check failed: %s expected '%s' %s actual '%s' (metric=%s)",
-                    flagPattern, expect, comparison, actual, metricStr);
+            String msg = String.format("FLAG check failed: %s expected '%s' actual '%s' (code=%s)",
+                    flagPattern, expect, actual, codeStr);
             log.warn(msg);
             throw new FlagCheckException(msg);
         }
         return true;
+    }
+
+    /**
+     * 按内容编号模板从数据文件计算值。
+     * 读取编号对应的模板，展开模式码，返回展开后的字符串。
+     */
+    private String computeFromTemplate(FtpClient client, String codeStr, ResolvedPath dataFile) {
+        ContentCode code = ContentCode.fromCode(codeStr);
+        if (code == null) {
+            log.warn("Unknown content code: {}", codeStr);
+            return null;
+        }
+        // 使用 ContentEngine 展开模板中的模式码
+        return contentEngine.expand(code.getTemplate(), dataFile, null, null, null, null, client);
     }
 
     /** 读取标志文件内容（首行，清理 \r 残留） */
@@ -221,85 +243,68 @@ public class FlagFileService {
         }
     }
 
-    /**
-     * 按 metric 码计算数据文件的实际值。
-     * L=行数, S=字节数, M=MD5, 其他→null
-     */
-    private String computeMetric(FtpClient client, String metric, ResolvedPath dataFile) {
-        if (dataFile == null || dataFile.fullPath() == null) return null;
-        String path = dataFile.fullPath();
-        return switch (metric.toUpperCase()) {
-            case "L" -> {
-                try { yield String.valueOf(client.countFileLines(path)); } catch (IOException e) { throw new RuntimeException(e); }
-            }
-            case "S" -> {
-                try { yield String.valueOf(client.getFileSize(path)); } catch (IOException e) { throw new RuntimeException(e); }
-            }
-            case "M" -> client.computeMd5(path);
-            default -> {
-                log.warn("Unknown FLAG metric: {}", metric);
-                yield null;
-            }
-        };
-    }
-
-    /** 两个字符串值的数值比较 */
-    private boolean compareValues(String expect, String actual, String op) {
-        if (expect == null || actual == null) return false;
-        try {
-            long e = Long.parseLong(expect.trim());
-            long a = Long.parseLong(actual.trim());
-            return switch (op) {
-                case "=", "==" -> e == a;
-                case ">" -> a > e;
-                case "<" -> a < e;
-                case ">=" -> a >= e;
-                case "<=" -> a <= e;
-                case "!=" -> a != e;
-                default -> expect.equals(actual);
-            };
-        } catch (NumberFormatException e) {
-            // 非数值 → 字符串比较
-            return switch (op) {
-                case "=", "==" -> expect.trim().equals(actual.trim());
-                case "!=" -> !expect.trim().equals(actual.trim());
-                default -> expect.trim().equals(actual.trim());
-            };
-        }
-    }
-
     // ==================== 后置处理方法 ====================
 
     /**
      * 处理后置操作字符串（无文件衍生变量，向后兼容）
      */
     public void process(FtpClient client, String operationsStr) {
-        process(client, operationsStr, null, null);
+        process(client, operationsStr, null, null, null, null);
     }
 
     /**
      * 处理后置操作字符串，支持 ResolvedPath 文件衍生变量。
-     *
-     * @param operationsStr 后置操作字符串
-     * @param fileInfo 数据文件的 ResolvedPath，用于路径继承和内容变量
-     * @param extraValues 额外运行时值（如 C=记录数），可为 null
      */
     public void process(FtpClient client, String operationsStr, ResolvedPath fileInfo,
                         Map<String, String> extraValues) {
+        process(client, operationsStr, fileInfo, extraValues, null, null);
+    }
+
+    /**
+     * 处理后置操作字符串，完整参数版。
+     *
+     * @param operationsStr 后置操作字符串
+     * @param fileInfo       数据文件的 ResolvedPath，用于路径继承和内容变量
+     * @param extraValues    额外运行时值（如 C=记录数，L=行数），可为 null
+     * @param categoryCode   类别代号（MSG 消息查询用），可为 null
+     * @param controlCode    控制代号（MSG 消息查询用），可为 null
+     */
+    public void process(FtpClient client, String operationsStr, ResolvedPath fileInfo,
+                        Map<String, String> extraValues, String categoryCode, String controlCode) {
         if (operationsStr == null || operationsStr.isEmpty()) return;
 
         for (String op : operationsStr.split(",")) {
-            String[] parts = op.split(";");
-            if (parts.length == 0) continue;
-            String keyword = parts[0].trim();
-            if (keyword.isEmpty()) continue; // 跳过空段
+            op = op.trim();
+            if (op.isEmpty()) continue;
+
+            // 格式: KEYWORD:rest 或 KEYWORD（MSG 无 rest）
+            int colonIdx = op.indexOf(':');
+            String keyword, rest;
+            if (colonIdx > 0) {
+                keyword = op.substring(0, colonIdx).trim();
+                rest = op.substring(colonIdx + 1).trim();
+            } else {
+                keyword = op.trim();
+                rest = "";
+            }
+
             FlagOperation operation = operations.get(keyword);
             if (operation == null) {
                 log.warn("Unknown post-operation keyword: {}", keyword);
                 continue;
             }
             try {
-                operation.execute(client, parts, fileInfo, extraValues);
+                // 将 rest 按 ; 拆分为 parts 数组，keyword 作为 parts[0]
+                String[] parts;
+                if (rest.isEmpty()) {
+                    parts = new String[]{keyword};
+                } else {
+                    String[] restParts = rest.split(";", -1);
+                    parts = new String[restParts.length + 1];
+                    parts[0] = keyword;
+                    System.arraycopy(restParts, 0, parts, 1, restParts.length);
+                }
+                operation.execute(client, parts, fileInfo, extraValues, categoryCode, controlCode);
             } catch (Exception e) {
                 log.error("Failed to process operation: {}", keyword, e);
             }
@@ -309,7 +314,7 @@ public class FlagFileService {
     // ==================== 路径解析工具 ====================
 
     /**
-     * 从操作 parts 中取指定索引的路径段，做路径继承处理。
+     * 从操作 parts 中取指定索引的路径段，做短码展开 + 路径继承。
      */
     String resolvePath(String[] parts, int index, ResolvedPath fileInfo) {
         String raw = parts.length > index ? parts[index].trim() : "";
@@ -317,20 +322,29 @@ public class FlagFileService {
     }
 
     /**
-     * 路径继承：不以 "/" 开头 → 自动加 "{dir}/" 前缀，并规范化 ".."。
+     * 路径处理：短码展开 → 路径继承 → .. 规范化。
+     * 不以 "/" 开头 → 自动加 "{dir}/" 前缀。
      */
     String resolvePath(String raw, ResolvedPath fileInfo) {
         if (raw == null || raw.isEmpty()) return raw;
-        if (raw.startsWith("/")) return raw; // 绝对路径，不变
-        if (fileInfo == null || fileInfo.dir() == null || fileInfo.dir().isEmpty()) return raw;
-        // 先对 raw 做文件衍生变量替换，再通过 ResolvedPath 做路径继承
-        String resolved = contentEngine.expandPathVariables(raw, fileInfo);
+
+        // 1. 展开文件名短码
+        String expanded = expandFileNameShortCodes(raw);
+
+        // 2. 绝对路径不变
+        if (expanded.startsWith("/")) {
+            // 仍需展开文件衍生变量（如 {stem} 已在短码展开后出现）
+            return normalizePath(contentEngine.expandPathVariables(expanded, fileInfo));
+        }
+        if (fileInfo == null || fileInfo.dir() == null || fileInfo.dir().isEmpty()) return expanded;
+
+        // 3. 路径继承：先展开文件衍生变量，再 resolveRelative
+        String resolved = contentEngine.expandPathVariables(expanded, fileInfo);
         return normalizePath(fileInfo.resolveRelative(resolved));
     }
 
     /**
      * 规范化路径中的 ".." 段。
-     * 例如: /data/export/BR001/../all.flg → /data/export/all.flg
      */
     public static String normalizePath(String path) {
         if (path == null || !path.contains("..")) return path;
@@ -350,15 +364,19 @@ public class FlagFileService {
 
     /**
      * 从操作字符串中过滤出指定操作类型的子串。
+     * <p>操作类型是 {@code KEYWORD:rest} 中的 KEYWORD 部分。
      */
     public static String filterOpsByType(String operationsStr, String opType) {
         if (operationsStr == null || operationsStr.isEmpty()) return null;
         if (opType == null) return operationsStr;
         StringBuilder sb = new StringBuilder();
         for (String op : operationsStr.split(",")) {
-            String[] parts = op.split(";");
-            String keyword = parts.length > 0 ? parts[0].trim() : "";
-            if (keyword.isEmpty()) continue; // 跳过空段
+            op = op.trim();
+            if (op.isEmpty()) continue;
+            // 提取 : 前的关键字
+            int colonIdx = op.indexOf(':');
+            String keyword = colonIdx > 0 ? op.substring(0, colonIdx).trim() : op.trim();
+            if (keyword.isEmpty()) continue;
             if (opType.equalsIgnoreCase(keyword)) {
                 if (sb.length() > 0) sb.append(",");
                 sb.append(op);
@@ -368,31 +386,15 @@ public class FlagFileService {
     }
 
     /**
-     * 从前置操作字符串中提取第一个 FLAG/READY 路径模式（不含 mode 后缀）。
-     *
-     * <p>
-     * 例如 {@code "FLAG:{stem}.OK;L,READY:other.txt"} → {@code "{stem}.OK"}。
-     * 只提取路径模式字符串，不展开文件变量。需要展开时组合使用 {@link #resolvePath(String, ResolvedPath)}。
-     * </p>
-     *
-     * @param preOps 前置操作字符串，逗号分隔
-     * @return 第一个 FLAG/READY 路径模式；无匹配时返回 null
+     * 从前置操作字符串中提取第一个 L 操作的路径模式（不含 content code 后缀）。
      */
     public static String extractFlagPathPattern(String preOps) {
-        if (preOps == null || preOps.isEmpty())
-            return null;
+        if (preOps == null || preOps.isEmpty()) return null;
         for (String op : preOps.split(",")) {
             op = op.trim();
-            String pathPart;
-            if (op.startsWith("FLAG:")) {
-                pathPart = op.substring(5).trim();
-            } else if (op.startsWith("READY:")) {
-                pathPart = op.substring(6).trim();
-            } else {
-                continue;
-            }
-            if (pathPart.isEmpty())
-                continue;
+            if (!op.startsWith("L:")) continue;
+            String pathPart = op.substring(2).trim();
+            if (pathPart.isEmpty()) continue;
             int semicolon = pathPart.indexOf(';');
             return semicolon > 0 ? pathPart.substring(0, semicolon).trim() : pathPart;
         }
@@ -402,7 +404,7 @@ public class FlagFileService {
     // ==================== 模式码引擎 ====================
 
     /**
-     * 模式码引擎 — 将 content 和 FLAG mode 中的单字母码替换为运行时值。
+     * 模式码引擎 — 将内容模板中的单字母模式码替换为运行时值。
      *
      * <p>单字母模式码（L/S/M/C/N/D/T/F/X/E/P）在独立出现（不与相邻大写字母连写）时被替换。
      * 多字母大写词如 "SUCCESS"、"OK"、"ERROR" 保持原样。
@@ -418,15 +420,6 @@ public class FlagFileService {
 
         /**
          * 扩展内容模板：将模式码替换为运行时值。
-         *
-         * @param template 内容模板，如 "L S M" 或 "C rows at N"
-         * @param fileInfo 数据文件信息，可为 null
-         * @param lines    行数，null 时从 fileInfo + client 获取（client 不为 null 时）
-         * @param size     字节数
-         * @param md5      MD5
-         * @param count    处理记录数
-         * @param client   FTP 客户端，用于延迟计算 L/S/M
-         * @return 替换后的字符串
          */
         String expand(String template, ResolvedPath fileInfo,
                       String lines, String size, String md5,
@@ -467,8 +460,7 @@ public class FlagFileService {
         }
 
         /**
-         * 仅替换路径变量（{stem}/{name}/{ext}/{dir}/{dn}/{up}），不做模式码展开。
-         * 用于操作路径中的变量替换。委托给 {@link TransferSupport#expandPathVariables}。
+         * 替换路径变量（{stem}/{name}/{ext}/{dir}/{dn}/{up}），不做模式码展开。
          */
         String expandPathVariables(String template, ResolvedPath fileInfo) {
             return TransferSupport.expandPathVariables(template, fileInfo);
@@ -477,7 +469,6 @@ public class FlagFileService {
         private String resolveCode(String code, ResolvedPath fileInfo,
                                     String lines, String size, String md5,
                                     String count, FtpClient client) {
-            // 先检查直接传入的值
             return switch (code) {
                 case "L" -> lines != null ? lines : (client != null && fileInfo != null
                         ? safeCountFileLines(client, fileInfo.fullPath()) : null);
@@ -493,19 +484,20 @@ public class FlagFileService {
                 case "X" -> fileInfo != null ? fileInfo.stem() : null;
                 case "E" -> fileInfo != null ? fileInfo.ext() : null;
                 case "P" -> fileInfo != null ? fileInfo.fullPath() : null;
-                default -> null; // 非模式码，原样保留
+                default -> null;
             };
         }
 
-        // 安全辅助方法：将 checked IOException 转为 unchecked RuntimeException
         private String safeCountFileLines(FtpClient client, String path) {
             try { return String.valueOf(client.countFileLines(path)); }
             catch (IOException e) { throw new RuntimeException(e); }
         }
+
         private String safeGetFileSize(FtpClient client, String path) {
             try { return String.valueOf(client.getFileSize(path)); }
             catch (IOException e) { throw new RuntimeException(e); }
         }
+
         private String safeComputeMd5(FtpClient client, String path) {
             return client.computeMd5(path);
         }
@@ -514,11 +506,15 @@ public class FlagFileService {
     // ==================== 内部类：操作实现 ====================
 
     interface FlagOperation {
-        void execute(FtpClient client, String[] parts) throws Exception;
+        /** 基本执行方法，兼容旧调用 */
+        default void execute(FtpClient client, String[] parts) throws Exception {
+            execute(client, parts, null, null, null, null);
+        }
 
-        /** 带文件衍生信息的执行方法，默认委托给无参版本 */
+        /** 完整执行方法，含文件衍生信息和消息代号 */
         default void execute(FtpClient client, String[] parts,
-                             ResolvedPath fileInfo, Map<String, String> extraValues) throws Exception {
+                             ResolvedPath fileInfo, Map<String, String> extraValues,
+                             String categoryCode, String controlCode) throws Exception {
             execute(client, parts);
         }
     }
@@ -536,45 +532,92 @@ public class FlagFileService {
 
         @Override
         public void execute(FtpClient client, String[] parts) throws Exception {
-            execute(client, parts, null, null);
+            execute(client, parts, null, null, null, null);
         }
 
         @Override
         public void execute(FtpClient client, String[] parts, ResolvedPath fileInfo,
-                      Map<String, String> extraValues) throws Exception {
+                            Map<String, String> extraValues,
+                            String categoryCode, String controlCode) throws Exception {
             String filePattern = parts.length > 1 ? parts[1].trim() : "";
-            String content = parts.length > 2 ? parts[2].trim() : "";
+            String contentCode = parts.length > 2 ? parts[2].trim() : "";
+
+            // 展开文件名短码
+            filePattern = expandFileNameShortCodes(filePattern);
 
             // 路径继承 + .. 规范化
             if (fileInfo != null && !filePattern.startsWith("/")) {
                 filePattern = normalizePath(fileInfo.resolveRelative(
                         contentEngine.expandPathVariables(filePattern, fileInfo)));
+            } else if (fileInfo != null) {
+                // 绝对路径也要展开文件衍生变量
+                filePattern = contentEngine.expandPathVariables(filePattern, fileInfo);
             }
 
-            // 内容模式码展开
+            // 按内容编号获取模板并展开
+            String resolvedContent = resolveContent(contentCode, fileInfo, extraValues, client);
+
+            try (OutputStream os = client.getOutputStream(filePattern)) {
+                byte[] bytes = (resolvedContent != null ? resolvedContent : "")
+                        .getBytes(StandardCharsets.UTF_8);
+                os.write(bytes);
+                client.completePendingCommand();
+            }
+            log.info("Generated {} file: {} ({} bytes)", flagType, filePattern,
+                    resolvedContent != null ? resolvedContent.length() : 0);
+        }
+
+        /**
+         * 按内容编号解析实际内容。
+         * 编号 00 或空 → 空字符串。
+         */
+        private String resolveContent(String codeStr, ResolvedPath fileInfo,
+                                      Map<String, String> extraValues, FtpClient client) {
+            if (ContentCode.isEmpty(codeStr)) return "";
+
+            ContentCode code = ContentCode.fromCode(codeStr);
+            if (code == null) {
+                log.warn("Unknown content code: {}, using empty", codeStr);
+                return "";
+            }
+
             String lines = extraValues != null ? extraValues.get("L") : null;
             String size = extraValues != null ? extraValues.get("S") : null;
             String md5 = extraValues != null ? extraValues.get("M") : null;
             String count = extraValues != null ? extraValues.get("C") : null;
-            String resolvedContent = contentEngine.expand(content, fileInfo, lines, size, md5, count, client);
 
-            try (OutputStream os = client.getOutputStream(filePattern)) {
-                byte[] bytes = resolvedContent.getBytes(StandardCharsets.UTF_8);
-                os.write(bytes);
-                client.completePendingCommand();
-            }
-            log.info("Generated {} flag file: {} ({} bytes)", flagType, filePattern,
-                    resolvedContent != null ? resolvedContent.length() : 0);
+            return contentEngine.expand(code.getTemplate(), fileInfo, lines, size, md5, count, client);
         }
     }
 
     /** 删除文件操作 */
     @Slf4j
     static class DeleteOp implements FlagOperation {
+
+        private String resolvePattern(String raw, ResolvedPath fileInfo) {
+            String expanded = expandFileNameShortCodes(raw);
+            if (fileInfo != null && !expanded.startsWith("/")) {
+                return normalizePath(fileInfo.resolveRelative(
+                        TransferSupport.expandPathVariables(expanded, fileInfo)));
+            }
+            if (fileInfo != null) {
+                return TransferSupport.expandPathVariables(expanded, fileInfo);
+            }
+            return expanded;
+        }
+
         @Override
         public void execute(FtpClient client, String[] parts) throws Exception {
+            execute(client, parts, null, null, null, null);
+        }
+
+        @Override
+        public void execute(FtpClient client, String[] parts, ResolvedPath fileInfo,
+                            Map<String, String> extraValues,
+                            String categoryCode, String controlCode) throws Exception {
             String pattern = parts.length > 1 ? parts[1].trim() : "";
             if (pattern.isEmpty()) return;
+            pattern = resolvePattern(pattern, fileInfo);
             String[] files = client.listFiles(pattern);
             for (String file : files) {
                 if (client.deleteFile(file)) {
@@ -589,11 +632,33 @@ public class FlagFileService {
     /** 重命名操作 */
     @Slf4j
     static class RenameOp implements FlagOperation {
+
+        private String resolvePattern(String raw, ResolvedPath fileInfo) {
+            String expanded = expandFileNameShortCodes(raw);
+            if (fileInfo != null && !expanded.startsWith("/")) {
+                return normalizePath(fileInfo.resolveRelative(
+                        TransferSupport.expandPathVariables(expanded, fileInfo)));
+            }
+            if (fileInfo != null) {
+                return TransferSupport.expandPathVariables(expanded, fileInfo);
+            }
+            return expanded;
+        }
+
         @Override
         public void execute(FtpClient client, String[] parts) throws Exception {
+            execute(client, parts, null, null, null, null);
+        }
+
+        @Override
+        public void execute(FtpClient client, String[] parts, ResolvedPath fileInfo,
+                            Map<String, String> extraValues,
+                            String categoryCode, String controlCode) throws Exception {
             String from = parts.length > 1 ? parts[1].trim() : "";
             String to = parts.length > 2 ? parts[2].trim() : "";
             if (from.isEmpty() || to.isEmpty()) return;
+            from = resolvePattern(from, fileInfo);
+            to = resolvePattern(to, fileInfo);
             String[] files = client.listFiles(from);
             for (String file : files) {
                 String targetPath = to.replace("*", file.substring(file.lastIndexOf('/') + 1));
@@ -606,22 +671,56 @@ public class FlagFileService {
         }
     }
 
-    /** 发送消息操作 */
+    /** 发送消息操作 — 从配置取代号查消息表 */
     @Slf4j
     static class SendMessageOp implements FlagOperation {
         private final MessageSender messageSender;
+        private final MessageConfigService messageConfigService;
 
-        SendMessageOp(MessageSender messageSender) {
+        SendMessageOp(MessageSender messageSender, MessageConfigService messageConfigService) {
             this.messageSender = messageSender;
+            this.messageConfigService = messageConfigService;
         }
 
         @Override
         public void execute(FtpClient client, String[] parts) throws Exception {
-            String target = parts.length > 1 ? parts[1].trim() : "";
-            String message = parts.length > 2 ? parts[2].trim() : "";
-            messageSender.send(target, message);
+            execute(client, parts, null, null, null, null);
+        }
+
+        @Override
+        public void execute(FtpClient client, String[] parts, ResolvedPath fileInfo,
+                            Map<String, String> extraValues,
+                            String categoryCode, String controlCode) throws Exception {
+            if (categoryCode == null || controlCode == null) {
+                log.warn("MSG operation skipped: no categoryCode/controlCode provided");
+                return;
+            }
+            MessageConfig msgConfig = messageConfigService.getConfig(categoryCode, controlCode);
+            if (msgConfig == null) {
+                log.warn("Message config not found: {}_{}", categoryCode, controlCode);
+                return;
+            }
+            // 展开消息模板中的占位符
+            String message = expandMessageTemplate(msgConfig.getMessageTemplate(), extraValues, fileInfo);
+            String targetConfig = msgConfig.getChannelType() + ":" + msgConfig.getTarget();
+            messageSender.send(targetConfig, message);
+        }
+
+        private String expandMessageTemplate(String template, Map<String, String> extraValues,
+                                             ResolvedPath fileInfo) {
+            if (template == null) return "";
+            String result = template;
+            if (extraValues != null) {
+                for (Map.Entry<String, String> e : extraValues.entrySet()) {
+                    result = result.replace("{" + e.getKey() + "}", e.getValue() != null ? e.getValue() : "");
+                }
+            }
+            if (fileInfo != null) {
+                result = result.replace("{stem}", fileInfo.stem() != null ? fileInfo.stem() : "");
+                result = result.replace("{name}", fileInfo.name() != null ? fileInfo.name() : "");
+                result = result.replace("{file}", fileInfo.fullPath() != null ? fileInfo.fullPath() : "");
+            }
+            return result;
         }
     }
-
 }
-

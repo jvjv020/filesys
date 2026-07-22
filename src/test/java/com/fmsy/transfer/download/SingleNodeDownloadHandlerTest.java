@@ -74,7 +74,7 @@ class SingleNodeDownloadHandlerTest {
         config.setTableName("mytable");
         config.setDbName("DB1");
         config.setSplitFields("REGION");
-        config.setPostOperations("SUB:{X}.flg;L S M");
+        config.setPostOperations("U:S.flg;03");
         config.setNodeId("node-1");
 
         result = new Result();
@@ -163,7 +163,7 @@ class SingleNodeDownloadHandlerTest {
         @Test
         @DisplayName("should generate total flag when postOps contains TOTAL")
         void shouldGenerateTotalFlag() throws Exception {
-            config.setPostOperations("TOTAL:/total.flg;L S M,SUB:{X}.flg;L S M");
+            config.setPostOperations("T:/total.flg;03,U:S.flg;03");
 
             handler.handle(command, config, result);
 

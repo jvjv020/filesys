@@ -131,34 +131,52 @@ Both directions stream batches (~1000 rows per `CloseableIterator.next()`) — u
   - `{dn}` — last segment of parent directory
   - `{up}` — parent of parent directory
 
-### Pre/Post File Operations (new short-keyword syntax)
+### Pre/Post File Operations (short-keyword + content-code syntax)
 
 **Pre-operations:**
-- `READY:path` — check file exists
-- `FLAG:path` — check flag exists only
-- `FLAG:path;mode` — flag content vs data file computed value
-- `FLAG:path;expect;mode` — literal expect vs data file computed value
+- `L:path` — check flag file exists only (was `READY:path` / `FLAG:path`)
+- `L:path;nn` — check flag exists, compare content using content code `nn`
 
-Mode syntax: `[#]L|M|S[=|>|<|>=|<=|!=]` or `?`
-- `#` = compute from data file (default), `@` = read from flag file
-- `L` = lines, `S` = size, `M` = MD5
-- `?` = existence check only
+Content code omitted (or `00`) = existence check only.
 
 **Post-operations:**
-- `FB:path;content` — feedback file (was GENERATE_FEEDBACK)
-- `SUB:path;content` — sub-flag file (was GENERATE_SUB_FLAG)
-- `TOTAL:path;content` — total flag file (was GENERATE_TOTAL_FLAG)
-- `DEL:path` — delete (was DELETE)
-- `REN:from;to` — rename (was RENAME)
-- `MSG:target;body` — send message (was SEND_MESSAGE)
+- `F:path;nn` — feedback file (was `FB`, via GENERATE_FEEDBACK)
+- `U:path;nn` — sub-flag file (was `SUB`, via GENERATE_SUB_FLAG)
+- `T:path;nn` — total flag file (was `TOTAL`, via GENERATE_TOTAL_FLAG)
+- `D:path` — delete (was `DEL`, via DELETE)
+- `R:from;to` — rename (was `REN`, via RENAME)
+- `M` — send message (uses config's category+control code to look up MessageConfig table)
 
-**Content mode codes** (for SUB/FB/TOTAL content):
-- `L` = lines, `S` = size, `M` = MD5, `C` = record count
-- `N` = timestamp, `D` = date, `T` = time
-- `F` = filename, `X` = stem, `E` = extension, `P` = full path
-- Example: `SUB:{X}.flg;L S M` → writes "1500 524288 d41d8c..."
+**Content codes** (defined in `ContentCode` enum):
+| Code | Template | Meaning |
+|------|----------|---------|
+| `00` | `""` | empty |
+| `01` | `SUCCESS` | success |
+| `02` | `OK` | ok |
+| `03` | `L S M` | lines + size + md5 |
+| `04` | `L S` | lines + size |
+| `05` | `C` | record count |
+| `11` | `L` | lines only |
+| `12` | `S` | size only |
+| `13` | `M` | md5 only |
+
+**Filename short codes** (appear in path patterns):
+| Code | Expands to | Example |
+|------|-----------|---------|
+| `S` | `{stem}` | `S.ok` → `{stem}.ok` → `file.ok` |
+| `N` | `{name}` | `N.flag` → `{name}.flag` |
+| `D` | `{dir}` | `D/S.flg` → `{dir}/{stem}.flg` |
+| `W` | `{dn}` | `W.flag` → `{dn}.flag` |
 
 **Path inheritance**: paths not starting with `/` automatically inherit `{dir}/` prefix (same directory as data file). `..` supported for parent directory traversal.
+
+**Examples:**
+- `L:S.ok;03` — check `{stem}.OK` exists, compare L/S/M
+- `U:S.ready;02` — generate `{stem}.ready` with content "OK"
+- `T:../W.flag;02` — generate `../{dn}.flag` with content "OK"
+- `D:*.ok` — delete `*.ok`
+- `R:*.flg;*.done` — rename `*.flg` to `*.done`
+- `M` — look up MessageConfig by category+control code, send message
 
 ## Database Tables (Chinese names are part of the contract)
 
@@ -168,6 +186,7 @@ All table/column names live in `util/TableNames` and `util/ColumnNames` as const
 - `明细表` (Detail) — sub-task rows for batch/bucket work
 - `结果表` (Result) — outcomes (status, duration, record count, file size, description)
 - `传输配置表` (TransferConfig) — declarative rules (paths, parser type, pre/post ops, split fields, empty-data handling, etc.)
+- `消息配置表` (MessageConfig) — message channel, target, and template; keyed by `类别代号`+`控制代号`
 
 ## Field-mapping Mechanics (`transfer/FieldMappingBuilder`)
 

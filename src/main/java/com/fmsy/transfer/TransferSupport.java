@@ -104,7 +104,8 @@ public class TransferSupport {
                              ResolvedPath fileInfo, Map<String, String> extraValues) {
         String postOps = config.getPostOperations();
         if (postOps != null && !postOps.isEmpty()) {
-            flagFileService.process(client, postOps, fileInfo, extraValues);
+            flagFileService.process(client, postOps, fileInfo, extraValues,
+                    config.getCategoryCode(), config.getControlCode());
         }
     }
 
@@ -117,7 +118,7 @@ public class TransferSupport {
     public void postProcess(FtpClient client, String postOps,
                              ResolvedPath fileInfo, Map<String, String> extraValues) {
         if (postOps != null && !postOps.isEmpty()) {
-            flagFileService.process(client, postOps, fileInfo, extraValues);
+            flagFileService.process(client, postOps, fileInfo, extraValues, null, null);
         }
     }
 

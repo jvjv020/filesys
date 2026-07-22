@@ -105,7 +105,7 @@ class SingleFileDownloadPipelineTest {
         @Test
         @DisplayName("full pipeline success")
         void success() throws Exception {
-            config.setPostOperations("SUB:/s.flg;L");
+            config.setPostOperations("U:/s.flg;11");
             mockPreAudit(100);
             mockEmptyOk(100);
             mockFtp();
@@ -166,7 +166,7 @@ class SingleFileDownloadPipelineTest {
         @Test
         @DisplayName("null auditCount -> countRecords fallback")
         void nullAuditCount() throws Exception {
-            config.setPostOperations("FB:/f.flg;S");
+            config.setPostOperations("F:/f.flg;12");
             when(targetTableRepository.count("DB1", "mytable")).thenReturn(50);
             mockEmptyOk(50);
             mockFtp();
@@ -209,7 +209,7 @@ class SingleFileDownloadPipelineTest {
         @Test
         @DisplayName("postAudit fail -> rollback + ERROR")
         void postAuditFail() throws Exception {
-            config.setPostOperations("FB:/f.flg;S");
+            config.setPostOperations("F:/f.flg;12");
             mockPreAudit(100);
             mockEmptyOk(100);
             mockFtp();
@@ -244,7 +244,7 @@ class SingleFileDownloadPipelineTest {
         @Test
         @DisplayName("with preAuditByBucket")
         void withPreAudit() throws Exception {
-            config.setPostOperations("SUB:/s.flg;L");
+            config.setPostOperations("U:/s.flg;11");
             when(auditService.preAuditByBucket("mytable", "REGION", FV, 50, "DB1")).thenReturn(50);
             mockEmptyOk(50);
             mockFtp();
@@ -328,7 +328,7 @@ class SingleFileDownloadPipelineTest {
         @Test
         @DisplayName("success -> detail SUCCESS")
         void success() throws Exception {
-            config.setPostOperations("FB:/f.flg;S");
+            config.setPostOperations("F:/f.flg;12");
             mockPreAudit(50);
             mockEmptyOk(50);
             mockFtp();
@@ -372,7 +372,7 @@ class SingleFileDownloadPipelineTest {
         @DisplayName("null detail id -> skip update")
         void nullId() throws Exception {
             d.setId(null);
-            config.setPostOperations("FB:/f.flg;S");
+            config.setPostOperations("F:/f.flg;12");
             mockPreAudit(50);
             mockEmptyOk(50);
             mockFtp();

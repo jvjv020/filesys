@@ -50,6 +50,11 @@ public final class ColumnNames {
     public static final String TEMP_CONFIG = "temp_config";
     public static final String STATUS = "状态";
 
+    // 消息配置表
+    public static final String MSG_CHANNEL_TYPE = "通道类型";
+    public static final String MSG_TARGET = "目标地址";
+    public static final String MSG_TEMPLATE = "消息模板";
+
     // 状态值
     public static final String STATUS_EMPTY = "";
     public static final String STATUS_PROCESSING = "P";
